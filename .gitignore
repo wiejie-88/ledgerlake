@@ -46,7 +46,8 @@ docker-compose.override.yml
 *.db
 
 # Editors / OS
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .idea/
 *.swp
 .DS_Store

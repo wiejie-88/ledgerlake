@@ -69,6 +69,8 @@ make maintenance              # compact files, expire old snapshots; logs file c
 - **Dashboard:** http://localhost:8501, a one-page view of the marts. It reads the serving database as `analyst`, so it only sees masked customer data.
 - **More days:** `make backfill from=2026-10-01 to=2026-10-07` runs the pipeline for each date in order.
 
+**From VS Code:** open the folder and use **Terminal → Run Task…**, then pick a `LedgerLake: …` task. Tasks include start, run a date (it asks for the date), backfill, demos, access test, maintenance, tests and open the dashboard. **Cmd+Shift+B** starts everything. The tasks add Docker Desktop's CLI to the PATH themselves. Output appears in VS Code's terminal panel; results appear in the dashboard and Airflow UI.
+
 To stop, run `make down`, which keeps the data. `make clean` deletes all data volumes and asks first. Day-to-day operations, re-runs, backfills and troubleshooting are in the [runbook](docs/runbook.md).
 
 ## Measured results

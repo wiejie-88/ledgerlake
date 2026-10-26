@@ -1,0 +1,117 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      "PATH": "/Applications/Docker.app/Contents/Resources/bin:${env:PATH}"
+    }
+  },
+  "presentation": {
+    "reveal": "always",
+    "panel": "dedicated",
+    "clear": true
+  },
+  "tasks": [
+    {
+      "label": "LedgerLake: Start everything (make up)",
+      "type": "shell",
+      "command": "make up",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Stop, keep data (make down)",
+      "type": "shell",
+      "command": "make down",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Service status (make ps)",
+      "type": "shell",
+      "command": "make ps",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Seed 60 days of source data (make seed)",
+      "type": "shell",
+      "command": "make seed",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Run pipeline for one date",
+      "type": "shell",
+      "command": "make run date=${input:date}",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Backfill a date range",
+      "type": "shell",
+      "command": "make backfill from=${input:fromDate} to=${input:toDate}",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Demos (time travel + schema evolution)",
+      "type": "shell",
+      "command": "make demo",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Access test (analyst vs engineer)",
+      "type": "shell",
+      "command": "make access-test",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Silver report (quarantine, PII, schema evolution)",
+      "type": "shell",
+      "command": "make silver-report",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Maintenance (compact, expire snapshots)",
+      "type": "shell",
+      "command": "make maintenance",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Tests in container (Spark + DAG)",
+      "type": "shell",
+      "command": "make test-container",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Open dashboard and Airflow",
+      "type": "shell",
+      "command": "open http://localhost:8501 http://localhost:8080",
+      "presentation": { "reveal": "silent" },
+      "problemMatcher": []
+    },
+    {
+      "label": "LedgerLake: Delete ALL data (make clean, asks first)",
+      "type": "shell",
+      "command": "make clean",
+      "presentation": { "reveal": "always", "focus": true, "panel": "dedicated" },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "date",
+      "type": "promptString",
+      "description": "Business date to run (YYYY-MM-DD)",
+      "default": "2026-10-15"
+    },
+    {
+      "id": "fromDate",
+      "type": "promptString",
+      "description": "Backfill from business date (YYYY-MM-DD)",
+      "default": "2026-10-15"
+    },
+    {
+      "id": "toDate",
+      "type": "promptString",
+      "description": "Backfill to business date (YYYY-MM-DD), inclusive",
+      "default": "2026-10-17"
+    }
+  ]
+}
