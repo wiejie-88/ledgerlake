@@ -7,6 +7,7 @@
 | D1-EVE | Done | 2026-10-26 |
 | D2-AM | Done | 2026-10-26 |
 | D2-MID | Done | 2026-10-26 |
+| D2-PM | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -189,6 +190,52 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **`ops.dq_results`** holds 3 runs: the manual run (32/32), the Airflow clean run (32/32), and the Airflow defect run (31/32), whose single failure row reads `silver.transactions | not_null:amount | error | false | 1`.
 - **Stored data is unchanged** after the simulation: `silver.transactions` has 100,860 rows, 0 NULL amounts and 0 `SIMULATED%` rows.
 
+## D2-PM: gold fact, dimensions (MERGE), marts
+
+**What was built:**
+- `jobs/gold/transforms.py`, pure functions:
+  - `build_dim_date`, `build_dim_customer` (account roll-ups plus `_row_hash`), `build_fact_transactions`;
+  - `mart_daily_spend`, `mart_advance_repayment`, `mart_customer_features`.
+- `jobs/gold/run.py` (`make gold date=D`):
+  - `dim_date` is created once;
+  - `dim_customer` uses a hash-based SCD1 MERGE;
+  - `fact_transactions` uses `merge_latest`, partitioned by `days(txn_ts)`;
+  - marts are rebuilt in full.
+- `quality/reconcile.py`: per-group reconciliation of each mart against silver.
+- Gold DQ suite of 20 `error` checks: keys, referential integrity to the dimensions, accepted categories, gold freshness, mart grain uniqueness and `reconcile_with_silver` for each mart. The `unique` check now accepts composite keys.
+- 7 Spark unit tests in `tests/spark/test_gold.py`, including reconciliation and tamper detection.
+- ADR 007.
+
+**Verification result.** Run on the lake from D2-AM, which holds silver through 2026-10-01. Then one more full day, 2026-10-02: tick, bronze, silver, silver DQ, gold, gold DQ.
+- **Tests:** `make test-spark` gives 27 passed in 47.4 s. Locally, `pytest` gives 23 passed and ruff is clean.
+- **`make gold date=2026-10-01`** (44 s wall):
+
+  | Table | Rows | Notes |
+  |---|---|---|
+  | dim_date | 1,461 | created |
+  | dim_customer | 2,010 | inserted 2,010 |
+  | fact_transactions | 100,860 | inserted 100,860 |
+  | mart_daily_spend | 620 | |
+  | mart_advance_repayment | 3 | |
+  | mart_customer_features | 4,828 | |
+
+- **Gold DQ for 2026-10-01:** 20/20 passed in 33.9 s.
+  - `reconcile_with_silver` reported `mismatched_groups=0` for all three marts.
+  - Freshness logged `latest=2026-10-01 required>=2026-09-30`.
+- **Re-run of gold for 2026-10-01:** `dim_customer` and `fact_transactions` reported `inserted=0 updated=0`, and the marts kept the same row counts.
+- **Next day, 2026-10-02:**
+  - Silver DQ: 32/32 passed.
+  - Gold: `dim_customer` inserted 5 and **updated 8**. That's 6 customer attribute changes plus 2 customers whose account roll-up changed when an account went dormant. `fact_transactions` inserted 1,772 and updated 107, for 102,632 rows. The marts have 630, 3 and 5,368 rows.
+  - Gold DQ: 20/20 passed in 25.1 s, with all three reconciliations at `mismatched_groups=0` and freshness `latest=2026-10-02`.
+- **Grand total cross-check:** `mart_daily_spend` holds 7,071,522.71 MYR across 87,806 transactions, matching silver's completed debits exactly.
+- **`mart_advance_repayment`** as of 2026-10-02:
+
+  | Cohort | Advances | Repaid | Overdue | Repayment rate | Rate among due | Avg days late |
+  |---|---|---|---|---|---|---|
+  | 2026-08 | 302 | 242 | 60 | 0.8013 | 0.8013 | 1.64 |
+  | 2026-09 | 304 | 113 | 5 | 0.3717 | 0.75 (24 due) | 0.0 |
+  | 2026-10 | 16 | 0 | 0 | 0.0 | none yet | — |
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -205,6 +252,8 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Silver run time:** silver takes 70–85 s per day. Most of it is Spark start-up and one MERGE per table. Acceptable at this scale.
 - **Empty snapshots:** a no-op MERGE (a re-run) still commits an empty Iceberg snapshot.
 - **DQ run time:** the silver DQ suite takes 40–46 s, because each check is a separate Spark action (ADR 006).
-- **Demo DAG:** `ledgerlake_dq_gate_demo` is a demo. The production DAG `ledgerlake_daily` arrives in D2-EVE. The gold freshness check is added with the gold suite in D2-PM.
+- **Demo DAG:** `ledgerlake_dq_gate_demo` is a demo. The production DAG `ledgerlake_daily` arrives in D2-EVE.
+- **Gold uses current silver:** gold is rebuilt from current silver, so a backfill of an older date doesn't produce point-in-time marts (ADR 007).
+- **Short history:** `income_regularity_3m` is low for the first months, because there are fewer than 3 months of history.
 - **Slow tests:** the generator tests take about 50 s because they run the in-memory seed three times.
 - **No `ops.pipeline_runs` yet:** that table and the run metrics written to it come with the Airflow DAG in D2-EVE.

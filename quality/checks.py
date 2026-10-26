@@ -26,7 +26,7 @@ class Check:
     """One data-quality rule on one table."""
 
     table: str
-    kind: str  # not_null | unique | accepted_values | positive | referential | freshness | quarantine_rate
+    kind: str  # not_null | unique | accepted_values | positive | referential | freshness | quarantine_rate | reconcile
     column: str
     severity: Severity = Severity.ERROR
     values: tuple[str, ...] = ()
@@ -43,6 +43,8 @@ class Check:
             return f"freshness:{self.column}<= {self.max_lag_days}d"
         if self.kind == "quarantine_rate":
             return f"quarantine_rate<={self.threshold:.0%}"
+        if self.kind == "reconcile":
+            return "reconcile_with_silver"
         return f"{self.kind}:{self.column}"
 
 
@@ -52,9 +54,10 @@ def count_nulls(df: DataFrame, column: str) -> int:
 
 
 def count_duplicates(df: DataFrame, column: str) -> int:
-    """Rows beyond the first for each non-null value of ``column``."""
-    keyed = df.where(F.col(column).isNotNull())
-    return keyed.count() - keyed.select(column).distinct().count()
+    """Rows beyond the first for each key; ``column`` may list several columns ("txn_date,category")."""
+    columns = [c.strip() for c in column.split(",")]
+    keyed = df.dropna(subset=columns)
+    return keyed.count() - keyed.select(*columns).distinct().count()
 
 
 def count_not_accepted(df: DataFrame, column: str, values: tuple[str, ...]) -> int:
@@ -81,6 +84,12 @@ def latest_value(df: DataFrame, column: str) -> date | None:
 
 def evaluate(check: Check, load: Loader, logical_date: date) -> CheckResult:
     """Run one check and return its result."""
+    if check.kind == "reconcile":
+        # Imported here: reconcile depends on jobs.gold, which the silver suite doesn't need.
+        from quality.reconcile import RECONCILERS
+
+        failed = RECONCILERS[check.table.split(".")[-1]](load)
+        return CheckResult(check.table, check.name, check.severity, failed == 0, failed, f"mismatched_groups={failed}")
     df = load(check.table)
     details = ""
     if check.kind == "not_null":

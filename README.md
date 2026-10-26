@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Day 1, silver (D2-AM) and the DQ module (D2-MID) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). Gold, the Airflow DAG and serving come in later blocks.
+> **Status:** Day 1, silver (D2-AM), the DQ module (D2-MID) and gold (D2-PM) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). The Airflow DAG and serving come in later blocks.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -23,6 +23,8 @@ make silver date=2026-09-30
 make silver-report            # quarantine reasons, PII layout, schema evolution evidence
 make dq layer=silver date=2026-09-30          # 32 DQ checks; results in lake.ops.dq_results
 make dq-gate-demo date=2026-09-30             # Airflow: a failing error check stops the downstream task
+make gold date=2026-09-30                     # dims + fact (MERGE) and marts
+make dq layer=gold date=2026-09-30            # 20 gold checks, incl. freshness and mart-vs-silver reconciliation
 ```
 
 The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow image. It took about 8 minutes on the reference MacBook Air.
@@ -48,6 +50,7 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make bronze date=2026-09-29` | Extracts all five sources incrementally into `lake.bronze.*` and replaces that date's partition. Re-running the same date gives the same counts. |
 | `make silver date=2026-09-29` | Validates and deduplicates bronze partition D, writes rejected rows to `quarantine.*` with a `failure_reason`, and MERGEs the rest into `silver.*`. Re-runs change nothing. |
 | `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
+| `make gold date=2026-09-30` | Builds `gold.dim_date`, `gold.dim_customer` (MERGE on a row hash), `gold.fact_transactions` (MERGE, partitioned by day) and the three marts (rebuilt) from current silver |
 | `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
 | `make dq-gate-demo date=2026-09-30` | Runs the `ledgerlake_dq_gate_demo` DAG twice: clean (both tasks succeed), then with a simulated `null_amount` defect (`dq_silver` fails, `gold` is `upstream_failed`) |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
@@ -99,8 +102,20 @@ Personal data is protected:
 
 `silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
 
+## Gold
+| Table | Grain | Built by |
+|---|---|---|
+| `gold.fact_transactions` | one transaction (partitioned by `days(txn_ts)`) | MERGE, newest `updated_at` wins |
+| `gold.dim_customer` | one customer (no PII) | MERGE INTO on a row hash (SCD type 1) |
+| `gold.dim_date` | one day, 2024–2027 | created once |
+| `gold.mart_daily_spend` | day × category | total and average spend, transaction count, customers |
+| `gold.mart_advance_repayment` | monthly request cohort | repayment rate (overall and among due advances), average days late |
+| `gold.mart_customer_features` | customer × month | spend level and daily volatility, salary credits and 3-month income regularity, advance usage |
+
+Spend means completed debits, and days and months are Malaysia business dates. Every gold run is checked by `make dq layer=gold`, which recomputes each mart from silver and requires `mismatched_groups=0`, plus key, referential and freshness checks. Details are in [ADR 007](docs/decisions/007-gold-model-and-reconciliation.md).
+
 ## Data quality
-`quality/` is a lightweight PySpark DQ module. The silver suite has 32 checks:
+`quality/` is a lightweight PySpark DQ module. The gold suite has 20 `error` checks (see Gold above). The silver suite has 32 checks:
 - **`error`:** not-null and unique business keys, accepted values for status, category and type columns, `amount > 0`, and referential integrity (transaction → account → customer, plus advances and events → customer).
 - **`warn`:** freshness, and a quarantine rate of at most 5%.
 
