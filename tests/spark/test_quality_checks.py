@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 
+from generator import settings as gen
 from quality.checks import Check, evaluate
 from quality.gate import Severity
 from quality.run import SIMULATED_DEFECTS, simulate_defect
@@ -82,3 +83,30 @@ def test_each_simulated_defect_fails_an_error_check(spark, defect: str) -> None:
         "unknown_category": "accepted_values:category",
     }[defect]
     assert failed == [expected]
+
+
+def test_quarantine_reason_counts_one_defect_type_for_the_day(spark) -> None:
+    quarantine = spark.createDataFrame(
+        [
+            ("null_amount", D),
+            ("negative_amount; unknown_category", D),
+            ("unknown_category", D),
+            ("unknown_category", date(2026, 9, 30)),  # other day: ignored
+        ],
+        "failure_reason STRING, _quarantine_date DATE",
+    )
+    bronze = spark.createDataFrame([(D,)] * 50, "_logical_date DATE")
+    tables = {"q": quarantine, "b": bronze}.__getitem__
+    check = Check("q", "quarantine_reason", "unknown_category", Severity.WARN, ref_table="b", threshold=0.02)
+    result = evaluate(check, tables, D)
+    assert result.check_name == "quarantine_reason:unknown_category<=2%"
+    assert (result.failed_rows, result.passed, result.details) == (2, False, "quarantined=2 bronze_rows=50 rate=0.0400")
+    none = evaluate(Check("q", "quarantine_reason", "orphan_account", ref_table="b", threshold=0.02), tables, D)
+    assert (none.failed_rows, none.passed) == (0, True)
+
+
+def test_every_injected_defect_type_is_recorded_by_the_silver_suite() -> None:
+    recorded = {(c.table, c.column) for c in SILVER if c.kind == "quarantine_reason"}
+    injected = {("quarantine.transactions", reason) for reason in gen.TXN_DEFECT_RATES}
+    injected |= {("quarantine.transactions", "superseded_by_late_update"), ("quarantine.app_events", "duplicate_row")}
+    assert recorded == injected

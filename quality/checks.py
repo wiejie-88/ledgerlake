@@ -26,14 +26,16 @@ class Check:
     """One data-quality rule on one table."""
 
     table: str
-    kind: str  # not_null | unique | accepted_values | positive | referential | freshness | quarantine_rate | reconcile
-    column: str
+    # not_null | unique | accepted_values | positive | referential | freshness | quarantine_rate |
+    # quarantine_reason | reconcile
+    kind: str
+    column: str  # quarantine_reason: the failure reason to count
     severity: Severity = Severity.ERROR
     values: tuple[str, ...] = ()
-    ref_table: str | None = None  # referential: parent table; quarantine_rate: bronze table
+    ref_table: str | None = None  # referential: parent table; quarantine_*: bronze table
     ref_column: str | None = None
     max_lag_days: int = 0  # freshness
-    threshold: float = 0.0  # quarantine_rate: maximum share of rejected rows
+    threshold: float = 0.0  # quarantine_*: maximum share of the day's bronze rows
 
     @property
     def name(self) -> str:
@@ -43,6 +45,8 @@ class Check:
             return f"freshness:{self.column}<= {self.max_lag_days}d"
         if self.kind == "quarantine_rate":
             return f"quarantine_rate<={self.threshold:.0%}"
+        if self.kind == "quarantine_reason":
+            return f"quarantine_reason:{self.column}<={self.threshold:.0%}"
         if self.kind == "reconcile":
             return "reconcile_with_silver"
         return f"{self.kind}:{self.column}"
@@ -112,6 +116,12 @@ def evaluate(check: Check, load: Loader, logical_date: date) -> CheckResult:
         rate = failed / total if total else 0.0
         details = f"rejected={failed} bronze_rows={total} rate={rate:.4f}"
         return CheckResult(check.table, check.name, check.severity, rate <= check.threshold, failed, details)
+    elif check.kind == "quarantine_reason":
+        # Records the day's count of one defect type (failed_rows) and warns when its share spikes.
+        failed, total = reason_counts(df, load(check.ref_table), logical_date, check.column)
+        rate = failed / total if total else 0.0
+        details = f"quarantined={failed} bronze_rows={total} rate={rate:.4f}"
+        return CheckResult(check.table, check.name, check.severity, rate <= check.threshold, failed, details)
     else:
         raise ValueError(f"unknown check kind {check.kind!r}")
     return CheckResult(check.table, check.name, check.severity, failed == 0, failed, details)
@@ -124,3 +134,12 @@ def quarantine_counts(quarantine: DataFrame, bronze: DataFrame, logical_date: da
         (F.col("_quarantine_date") == day) & ~F.col("failure_reason").isin(*AUDIT_REASONS)
     ).count()
     return rejected, bronze.where(F.col("_logical_date") == day).count()
+
+
+def reason_counts(quarantine: DataFrame, bronze: DataFrame, logical_date: date, reason: str) -> tuple[int, int]:
+    """(rows quarantined for ``logical_date`` with ``reason`` among their reasons, bronze rows for that date)."""
+    day = F.lit(logical_date).cast("date")
+    matched = quarantine.where(
+        (F.col("_quarantine_date") == day) & F.array_contains(F.split("failure_reason", "; "), reason)
+    ).count()
+    return matched, bronze.where(F.col("_logical_date") == day).count()

@@ -20,6 +20,9 @@ SPEC F6 and §6 ask for DQ checks after silver and gold, with results stored in 
   - `gate.py`: `CheckResult`, `Severity`, and `enforce()`, which raises `DataQualityError` on any failed `error` check. It contains no Spark code.
   - `run.py`: the CLI, `python -m quality.run --layer silver --date D --run-id R`. It evaluates the suite, replaces run R's rows in `ops.dq_results`, and exits 1 on a blocking failure.
 - **Stopping downstream work is Airflow's job.** A task that exits non-zero fails, and its downstream tasks become `upstream_failed`. The DQ task just has to exit 1. The `ledgerlake_daily` DAG (D2-EVE) puts `dq_silver` and `dq_gold` tasks between layers.
+- **Per-defect-type counts** (added after D3-EVE to close a SPEC §9 acceptance gap). The `quarantine_reason` kind records, for every injected defect type, how many rows silver quarantined that day with that reason. The count goes in `failed_rows`, with the share of the day's bronze rows in `details`.
+  - The types are `duplicate_row`, `null_amount`, `negative_amount`, `unknown_category`, `orphan_account` and the `superseded_by_late_update` audit rows for transactions, plus `duplicate_row` for app events. The list is `quarantine.suites.DEFECT_TYPES`, and a test checks it against the generator's defect list.
+  - They are `warn` checks. Defects are expected input, so the point is to record them every run, and warn when one type exceeds 2% of the day's rows (10% for late-update audit rows).
 - **Severities:**
   - Every contract check (keys, uniqueness, referential integrity, accepted values, amounts) is `error`. Silver is built to satisfy these, so a failure means a pipeline bug, and it must not reach gold.
   - Freshness (`txn_date` within 1 day of the logical date) is `warn`. So is quarantine rate (at most 5% of the day's bronze transactions rejected, not counting `superseded_by_late_update` audit rows).
@@ -32,5 +35,5 @@ SPEC F6 and §6 ask for DQ checks after silver and gold, with results stored in 
 - **One result row per failing record:** too large. Counts plus quarantine tables give both the summary and the evidence.
 
 ## Consequences
-- The silver suite (32 checks) takes about 40–46 s, because each check runs its own Spark action over the full current silver tables. Fine at this scale; at larger scale, checks could be batched into one aggregation per table.
+- The silver suite (32 checks at first, 39 with the per-defect counts) takes about 30–46 s, because each check runs its own Spark action over the full current silver tables. Fine at this scale; at larger scale, checks could be batched into one aggregation per table.
 - An Airflow task's `run_id` is used as the DQ `run_id`, so results can be joined back to DAG runs.

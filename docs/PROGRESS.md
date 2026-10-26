@@ -444,6 +444,22 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Cleanup:** the fresh copy's stack and its 3 volumes were removed, and the main stack was restarted with its data.
 - **First-build time:** the 491 s for a first-ever `make up` is the D1-AM measurement. The fresh-copy run reused cached image layers, so it doesn't re-measure a cold build.
 
+## Follow-up: per-defect-type counts in `ops.dq_results` (SPEC §9 acceptance)
+
+**What changed:**
+- New check kind `quarantine_reason` (`quality/checks.py`). For each injected defect type it records that day's quarantined row count in `failed_rows`, and warns when that type exceeds a share of the day's bronze rows. The thresholds are 2% for defects, and 10% for `superseded_by_late_update` audit rows.
+- The silver suite gained 7 `warn` checks (`quality/suites.py: DEFECT_TYPES`): `duplicate_row`, `null_amount`, `negative_amount`, `unknown_category`, `orphan_account` and `superseded_by_late_update` for transactions, plus `duplicate_row` for app events. That brings the suite from 32 to 39 checks.
+- 2 Spark tests:
+  - the count logic (multi-reason rows, other days excluded);
+  - every defect type the generator injects has a check.
+- ADR 006 updated.
+
+**Verification result:**
+- **`make dq layer=silver date=2026-09-29`** (initial load): 39/39 passed in 31.3 s. Recorded counts were `duplicate_row` 584, `null_amount` 397, `negative_amount` 416, `unknown_category` 395, `orphan_account` 371, `superseded_by_late_update` 0 (the initial load has no earlier versions) and `app_events` `duplicate_row` 253. Those equal the defects the generator reported injecting at seed.
+- **`make dq layer=silver date=2026-10-07`:** 39/39 passed in 32.6 s. Recorded 12 / 7 / 4 / 7 / 4 / 111 / 5 (late-update audit rate 6.91%, under 10%).
+- **Independent cross-check:** a direct count from `lake.quarantine.*` by `_quarantine_date` and exploded reason equals the `failed_rows` recorded in `ops.dq_results` for **all 14 checks** on both dates.
+- **Tests:** `make test-container` gives 45 passed.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -472,7 +488,7 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Lost silver DQ results in earlier DAG runs:** DAG runs before the D3-EVE fix (D2-EVE through D3-MID) lost their `dq_silver` rows in `ops.dq_results`. The gate itself worked: `dq_silver` passed or failed before `dq_gold` ran.
 - **Backfill command untested:** `airflow backfill create` is documented in the runbook but wasn't exercised. Backfills were verified as sequential `make run date=…`.
 - **No GitHub CI run yet:** CI hasn't run on GitHub Actions (no remote); it passed in a local clean-container stand-in.
-- **Acceptance gap (SPEC §9, third criterion):** every injected defect type is quarantined with a reason, and the counts reconcile with the source (D2-AM). But `ops.dq_results` records only an aggregate `quarantine_rate` check per run, not one row per defect type. A per-reason count check would close this.
+- **Acceptance gap (SPEC §9, third criterion): closed** by the per-defect-type checks below.
 - **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.
 - **Coarse tick duration:** `generate_tick` records `duration_s` from bash `$SECONDS`, which has 1-second resolution.
 - **Manual runs need the business date:** manual runs without `business_date` take the data interval Airflow infers from the trigger time. Seen in the test: the 10-24 to 10-25 interval for a run triggered on 2026-10-26. Always pass `business_date` for manual runs; `make run` does this.

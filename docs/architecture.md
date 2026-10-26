@@ -56,7 +56,7 @@ flowchart LR
 | generate_tick | One more day of synthetic source data | `source.generator_log`: a generated day is skipped |
 | extract_bronze | 5 entities read with `watermark_low < updated_at/event_ts < end of day` | Lower bound comes from earlier bronze partitions; partition D is overwritten (ADR 004) |
 | silver | Validate, deduplicate, audit late updates, conform, MERGE | Only new or newer rows are merged; quarantine partition D is overwritten (ADR 005, 011) |
-| dq_silver | 32 checks → `ops.dq_results`; exits 1 on an `error` failure | Rows for the run id are replaced (ADR 006) |
+| dq_silver | 39 checks (including one count per injected defect type) → `ops.dq_results`; exits 1 on an `error` failure | Rows for the run id are replaced (ADR 006) |
 | gold | dims and fact via MERGE; marts rebuilt | Changed-row MERGE; marts are deterministic (ADR 007) |
 | dq_gold | 20 checks, including freshness and mart-vs-silver reconciliation | Same as dq_silver |
 | publish | TRUNCATE and INSERT of 4 serving tables in one transaction; SQL re-applied | Identical tables on re-run (ADR 009) |

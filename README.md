@@ -37,7 +37,7 @@ Features are mapped to the skills listed in SPEC §1.
 | Spark | PySpark transformations as pure, unit-tested functions: `jobs/silver/transforms.py`, `jobs/gold/transforms.py` |
 | Airflow | `dags/ledgerlake_daily.py`: business-date scheduling, retries, failure callback, DQ gate stops downstream tasks |
 | SQL and NoSQL sources | Incremental extracts from Postgres (`updated_at`) and MongoDB (`event_ts`) with idempotent watermarks ([ADR 004](docs/decisions/004-incremental-extract-watermarks.md)) |
-| Data quality | Quarantine with failure reasons; 32 silver and 20 gold checks; `error` vs `warn` severity; mart-to-silver reconciliation; results in `ops.dq_results` |
+| Data quality | Quarantine with failure reasons; 39 silver checks (including a per-run count of every injected defect type) and 20 gold checks; `error` vs `warn` severity; mart-to-silver reconciliation; results in `ops.dq_results` |
 | Data governance and access control | PII hashed in silver and isolated in `customers_pii`; `analyst` / `engineer` roles; masked view; 30-test access proof ([docs/access_control.md](docs/access_control.md)) |
 | Documentation | [Architecture](docs/architecture.md), [data dictionary](docs/data_dictionary.md), [runbook](docs/runbook.md), [15 ADRs](docs/decisions/README.md) |
 | Reproducibility | Pinned images, JARs (SHA-256) and packages; deterministic generator (same fingerprint on every seed); CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) |
@@ -92,7 +92,8 @@ Every figure below was measured, not estimated. The quick start figures come fro
 | Gold: fact rows / `mart_daily_spend` / `mart_customer_features` | 99,293 / 610 / 3,840 |
 | Quarantined transaction keys by reason | duplicate 600, unknown category 400, negative amount 420, null amount 399, orphan account 374, plus 99 late-update audit rows |
 | Injected vs quarantined defects (D2-AM check) | equal for every defect type |
-| DQ per run | 32 silver and 20 gold checks; all passed both days; mart reconciliation `mismatched_groups=0` |
+| DQ per run | 32 silver and 20 gold checks in the fresh run, all passed both days; mart reconciliation `mismatched_groups=0`. The 7 per-defect-type checks came afterwards, giving 39 silver checks. |
+| Defect counts in `ops.dq_results` (2026-09-29 run) | duplicate 584, negative amount 416, null amount 397, unknown category 395, orphan account 371, duplicate events 253. Equal to the generator's injected counts, and to a direct count of the quarantine tables |
 | Incremental-day task durations | extract_bronze 18.4 s, silver 43.3 s, dq_silver 24.3 s, gold 23.4 s, dq_gold 19.2 s, publish 7.6 s |
 | Re-running a date | all 26 tables have identical row counts (D2-EVE); silver and gold commit no new snapshot (ADR 011) |
 | Time-travel audit, 2026-09-29 | completed spend 91,960.60 MYR as first reported, against 95,201.51 MYR now: +3,240.91 from 99 late status changes |

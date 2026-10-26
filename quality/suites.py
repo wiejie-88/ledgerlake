@@ -13,6 +13,31 @@ def _keys(table: str, key: str) -> list[Check]:
     return [Check(table, "not_null", key), Check(table, "unique", key)]
 
 
+# Injected defect types per quarantine table, with the share of the day's bronze rows above which a warning is
+# raised. Recording them every run puts each defect type's count in ops.dq_results (SPEC §9).
+# Late-update audit rows run higher: about 7% of transactions start pending and settle on a later day.
+DEFECT_TYPES: dict[str, dict[str, float]] = {
+    "transactions": {
+        "duplicate_row": 0.02,
+        "null_amount": 0.02,
+        "negative_amount": 0.02,
+        "unknown_category": 0.02,
+        "orphan_account": 0.02,
+        "superseded_by_late_update": 0.10,
+    },
+    "app_events": {"duplicate_row": 0.02},
+}
+
+
+def _defect_counts() -> list[Check]:
+    return [
+        Check(f"quarantine.{entity}", "quarantine_reason", reason, severity=WARN, ref_table=f"bronze.{entity}",
+              threshold=threshold)
+        for entity, reasons in DEFECT_TYPES.items()
+        for reason, threshold in reasons.items()
+    ]  # fmt: skip
+
+
 SILVER: list[Check] = [
     *_keys("silver.customers", "customer_id"),
     Check("silver.customers", "accepted_values", "income_band", values=rules.INCOME_BANDS),
@@ -39,6 +64,7 @@ SILVER: list[Check] = [
         ref_table="bronze.transactions",
         threshold=0.05,
     ),
+    *_defect_counts(),
     *_keys("silver.cash_advances", "advance_id"),
     Check("silver.cash_advances", "not_null", "amount"),
     Check("silver.cash_advances", "positive", "amount"),
