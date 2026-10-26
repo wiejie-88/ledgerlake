@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Days 1 and 2 plus D3-AM are done and verified on Apple Silicon: the platform, generator, bronze, silver, DQ, gold, the `ledgerlake_daily` Airflow DAG, and publishing to a serving database with role-based access. See [docs/PROGRESS.md](docs/PROGRESS.md). The time-travel and maintenance demos, CI and the final docs come next.
+> **Status:** Days 1 and 2, D3-AM and D3-MID are done and verified on Apple Silicon. That covers the platform, generator, bronze, silver, DQ, gold, the `ledgerlake_daily` Airflow DAG, serving with role-based access, and the time-travel, schema-evolution and maintenance commands. See [docs/PROGRESS.md](docs/PROGRESS.md). CI and the final docs come next.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -18,6 +18,8 @@ make seed    # 60 days of synthetic source data in Postgres and MongoDB
 make run date=2026-09-29      # the whole pipeline in Airflow (ledgerlake_daily) for one business date
 make run date=2026-09-30      # next day: tick, bronze, silver, DQ, gold, DQ, publish
 make access-test              # prove what the analyst and engineer roles can read in the serving database
+make demo                     # Iceberg time-travel audit + schema-evolution demo
+make maintenance              # compact files, expire old snapshots; file counts before/after in ops.maintenance_log
 ```
 
 Each layer can also be run on its own:
@@ -60,6 +62,10 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
 | `make publish date=2026-10-04` | Publishes the 3 gold marts and `customer_profile` to the `serving` database in one transaction, and re-applies `serving/*.sql` (tables, masked view, roles, grants) |
 | `make access-test` | Logs in as `analyst` and `engineer` and proves what each can and cannot read (30 tests). See [docs/access_control.md](docs/access_control.md). |
+| `make demo-time-travel [date=2026-10-04]` | Audit demo: reads `gold.fact_transactions` as of the snapshot built for that business date (`VERSION AS OF` and `TIMESTAMP AS OF`) and shows what has been restated since. Defaults to the previous business date. |
+| `make demo-schema-evolution` | Shows `silver.app_events`' schema id change when `referral_source` was added, and how old and new rows read |
+| `make demo` | Both demos |
+| `make maintenance [retain=5]` | For every lake table: compact data files, rewrite manifests, and expire snapshots, keeping the last N. Logs snapshot, current, referenced and physical file counts before and after to `lake.ops.maintenance_log`. |
 | `make run date=2026-10-03` | Runs the whole `ledgerlake_daily` DAG for one business date (`airflow dags test`). Re-running a date changes nothing. |
 | `make dq-gate-demo date=2026-10-04` | Runs `ledgerlake_daily` with a simulated `null_amount` defect: `dq_silver` fails, `gold` and `dq_gold` become `upstream_failed`, and the failure is logged in `lake.ops.pipeline_runs`. Stored data isn't changed; run `make run` for the same date afterwards. |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
@@ -133,6 +139,12 @@ Details are in [ADR 008](docs/decisions/008-airflow-orchestration.md).
 | `gold.mart_customer_features` | customer × month | spend level and daily volatility, salary credits and 3-month income regularity, advance usage |
 
 Spend means completed debits, and days and months are Malaysia business dates. Every gold run is checked by `make dq layer=gold`, which recomputes each mart from silver and requires `mismatched_groups=0`, plus key, referential and freshness checks. Details are in [ADR 007](docs/decisions/007-gold-model-and-reconciliation.md).
+
+## Time travel and maintenance
+- **Time travel (audit):** "What did gold report for 2026-10-04 when it was built?" `make demo-time-travel date=2026-10-04` reads the fact table as of that build. In the verification run it reported 87,060.21 MYR of completed spend then, against 89,979.40 MYR now, because of 113 late-arriving status changes since.
+- **Maintenance:** `make maintenance` compacts small files and expires snapshots beyond the last 5. In the verification run it reduced physical data files from 4,119 to 2,707, and `silver.transactions` went from 841 data files to 1. Physical object counts are checked against Iceberg's references, so orphaned files would show up.
+
+Time travel reaches only snapshots that maintenance kept. Details are in [ADR 010](docs/decisions/010-time-travel-and-maintenance.md).
 
 ## Serving and access control
 After `dq_gold` passes, `publish` replaces the contents of four tables in the Postgres `serving` database in one transaction: the three marts and `customer_profile`.

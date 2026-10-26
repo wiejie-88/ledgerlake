@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq publish access-test run dq-gate-demo reset-lake test-container test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq publish access-test demo demo-time-travel demo-schema-evolution maintenance run dq-gate-demo reset-lake test-container test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -66,6 +66,17 @@ publish: ## Publish gold marts + customer profile to the serving database: make 
 
 access-test: ## Prove what the analyst and engineer roles can and cannot read in the serving database
 	$(COMPOSE) exec airflow python -m pytest -v -p no:cacheprovider tests/integration
+
+demo-time-travel: ## Audit demo: gold.fact_transactions as of the previous gold run vs now (optional date=YYYY-MM-DD)
+	$(COMPOSE) exec airflow python -m jobs.demo.time_travel $(if $(date),--as-of-date $(date),)
+
+demo-schema-evolution: ## Show silver.app_events' schema change (referral_source) and how old/new rows read
+	$(COMPOSE) exec airflow python -m jobs.demo.schema_evolution
+
+demo: demo-time-travel demo-schema-evolution ## Run both Iceberg demos
+
+maintenance: ## Compact files, rewrite manifests, expire snapshots (keep last 5); file counts in ops.maintenance_log
+	$(COMPOSE) exec airflow python -m jobs.maintenance.run $(if $(retain),--retain-last $(retain),)
 
 run: ## Run the full ledgerlake_daily DAG for one business date: make run date=YYYY-MM-DD
 	@test -n "$(date)" || (echo "usage: make run date=YYYY-MM-DD" && exit 2)

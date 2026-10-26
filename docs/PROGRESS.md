@@ -10,6 +10,7 @@
 | D2-PM | Done | 2026-10-26 |
 | D2-EVE | Done | 2026-10-26 |
 | D3-AM | Done | 2026-10-26 |
+| D3-MID | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -316,6 +317,41 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Re-publishing 2026-10-04:** row counts and an MD5 over all rows were identical for all 4 serving tables.
 - **`make run date=2026-10-05`:** all **7** tasks `success`, including `publish` (660 / 3 / 5,787 / 2,030 rows), in 237 s wall. `make access-test` afterwards: 30 passed.
 
+## D3-MID: time-travel demo, maintenance task
+
+**What was built:**
+- `jobs/demo/time_travel.py` (`make demo-time-travel [date=D]`): an audit of `gold.fact_transactions`.
+  - It finds the snapshot built for business date D (the newest snapshot with `max(_logical_date) = D`).
+  - It reads it `VERSION AS OF` and `TIMESTAMP AS OF`, and compares D's rows, completed spend and pending count then and now.
+  - It lists status changes since that snapshot.
+  - The pure helpers are in `jobs/demo/audit.py`.
+- `jobs/demo/schema_evolution.py` (`make demo-schema-evolution`): the schema id change from the metadata log, the current columns, and old and new rows. `make demo` runs both demos.
+- `jobs/maintenance/run.py` (`make maintenance [retain=N]`): for every lake table, `rewrite_data_files`, `rewrite_manifests`, then `expire_snapshots(retain_last=5)`.
+  - It measures snapshots, current data files, files referenced by any snapshot, and physical MinIO objects before and after.
+  - Results go to `lake.ops.maintenance_log`, plus a row in `ops.pipeline_runs`.
+- 2 Spark unit tests in `tests/spark/test_demo_audit.py`. ADR 010.
+
+**Verification result:**
+- **Tests:** `make test-container` gives 36 passed (31 Spark, 5 DAG). Ruff is clean.
+- **`make demo`** (25 s wall, before maintenance):
+  - The time-travel audit of 2026-10-04 used snapshot `2244984067148293756` (committed 11:04:53).
+  - `VERSION AS OF` and `TIMESTAMP AS OF` both returned **105,813** rows; there are 107,300 now.
+  - As reported then: 1,430 rows, completed spend **87,060.21 MYR**, 97 pending. Now: 1,430 rows, **89,979.40 MYR**, 50 pending. That's a restatement of **+2,919.19 MYR**.
+  - 113 transactions changed status since that snapshot: 103 pending → completed, 5 → failed, 5 → reversed. One example: `T20260921001137` was pending then and completed now (updated 2026-10-05 02:18 UTC).
+  - Schema evolution: the metadata log shows `schema_id=0` at 10:01:26 and `schema_id=1` at 10:01:32. Rows without `referral_source`: 36,174 (event dates 2026-08-01 to 09-13). Rows with it: 18,524 (09-14 to 10-05).
+- **`make maintenance`, run 1** (96 s wall, 25 tables): physical data files went from **4,119 to 2,707**.
+  - `silver.transactions`: current files **841 → 1**, physical files 2,000 → 1,141 (the remainder is referenced by the 5 retained snapshots).
+  - `silver.accounts`, `customers`, `customers_pii` and `cash_advances`: about 230–241 current files → 1 each.
+  - `gold.fact_transactions`: physical files 453 → 263. Its current 67 files are already one per day partition, so there was nothing to compact.
+  - `ops.dq_results`: current files 88 → 1.
+  - Snapshots were trimmed to 5 per table.
+  - Physical object counts equal referenced counts for every table, so **no orphan files** were left.
+- **`make maintenance`, run 2** (49 s): converged. Physical files 2,708 → 2,678, only from compacting the run log's own new rows.
+- **After maintenance:**
+  - The time-travel demo still found the 10-04 snapshot (among the 5 retained) and gave identical figures.
+  - Silver DQ: 32/32 passed in **18.9 s**, against 28.5–34.5 s in earlier runs. Gold DQ: 20/20 passed in **20.4 s**, against 24.3–30.7 s. Single samples, not a benchmark.
+- **`lake.ops.maintenance_log`** holds 50 rows (25 tables × 2 runs). The before and after sums are 6,827 and 5,385 physical data files.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -336,6 +372,14 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Driver-side publish:** publish collects the serving tables to the Spark driver. That's fine for about 8.4k rows; larger volumes would need COPY plus a table swap (ADR 009).
 - **PII copy:** `customer_profile` is a second copy of personal data, readable by `engineer` only and rebuilt on every publish.
 - **Access-control scope:** access control covers the serving database only. Lake storage (MinIO, Iceberg) uses platform credentials that analysts don't have.
+- **Small files and full-table rewrites:**
+  - Each MERGE writes up to 200 small files, because of Spark's default shuffle partitions.
+  - Copy-on-write MERGE rewrites the whole table even when nothing changed. For example, the 10-03 gold re-run snapshot shows 104,383 rows added and 104,383 deleted.
+  - Maintenance compacts the result. Fixing it at the source (fewer shuffle partitions, pre-filtering MERGE sources to changed rows, or merge-on-read) is a follow-up (ADR 010).
+- **Mart history:** gold marts are rebuilt with `createOrReplace`, so expiry keeps only their latest snapshot (7 → 1). Time travel on marts isn't retained; the audit demo uses `fact_transactions`.
+- **Limited time-travel window:** time travel reaches only the last 5 snapshots per table after maintenance.
+- **Shared run id:** manual maintenance runs share `run_id = manual` in `ops.maintenance_log`; `maintained_at` tells them apart.
+- **Maintenance isn't scheduled:** it's a manual `make` command, not part of `ledgerlake_daily`.
 - **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.
 - **Coarse tick duration:** `generate_tick` records `duration_s` from bash `$SECONDS`, which has 1-second resolution.
 - **Manual runs need the business date:** manual runs without `business_date` take the data interval Airflow infers from the trigger time. Seen in the test: the 10-24 to 10-25 interval for a run triggered on 2026-10-26. Always pass `business_date` for manual runs; `make run` does this.
