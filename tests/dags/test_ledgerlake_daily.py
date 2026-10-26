@@ -30,14 +30,14 @@ def test_no_import_errors(dagbag: DagBag) -> None:
 
 
 def test_task_chain(dagbag: DagBag) -> None:
-    dag = dagbag.get_dag("ledgerlake_daily")
+    dag = dagbag.dags["ledgerlake_daily"]  # in memory; get_dag() queries the metadata DB
     assert sorted(dag.task_ids) == sorted(ORDER)
     for upstream, downstream in zip(ORDER, ORDER[1:], strict=False):
         assert dag.get_task(downstream).upstream_task_ids == {upstream}
 
 
 def test_retries_and_callbacks(dagbag: DagBag) -> None:
-    dag = dagbag.get_dag("ledgerlake_daily")
+    dag = dagbag.dags["ledgerlake_daily"]  # in memory; get_dag() queries the metadata DB
     assert dag.max_active_runs == 1 and dag.catchup is False
     for task in dag.tasks:
         expected_retries = 0 if task.task_id.startswith("dq_") else 2
@@ -48,7 +48,7 @@ def test_retries_and_callbacks(dagbag: DagBag) -> None:
 
 
 def test_every_task_uses_the_business_date(dagbag: DagBag) -> None:
-    dag = dagbag.get_dag("ledgerlake_daily")
+    dag = dagbag.dags["ledgerlake_daily"]  # in memory; get_dag() queries the metadata DB
     for task in dag.tasks:
         assert "params.business_date or data_interval_start.in_timezone('Asia/Kuala_Lumpur')" in task.bash_command
 

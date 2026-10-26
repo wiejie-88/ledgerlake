@@ -11,6 +11,7 @@
 | D2-EVE | Done | 2026-10-26 |
 | D3-AM | Done | 2026-10-26 |
 | D3-MID | Done | 2026-10-26 |
+| D3-PM | Done locally; **GitHub run pending** (no remote yet) | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -377,6 +378,32 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - Both runs succeeded with the DQ gates passing, including the reconciliation.
 - `make test-container`: 39 passed.
 
+## D3-PM: unit tests, DAG import test, GitHub Actions, pre-commit
+
+**What was built:**
+- `.github/workflows/ci.yml`, triggered on every push and pull request:
+  - `lint` job: ruff check and format check.
+  - `test` job: Temurin 17 and Python 3.11, installing Airflow 3.3.2, PySpark 3.5.9 and the dev tools under the official Airflow constraints (the same pins as the image), then `pytest`.
+  - Actions are pinned to release tags, permissions are read-only, and superseded runs are cancelled.
+- `.pre-commit-config.yaml`: ruff-check and ruff-format (v0.17.0), plus trailing-whitespace, end-of-file, check-yaml, merge-conflict, large-file and private-key hooks (v6.0.0). `pre-commit==4.6.2` added to `requirements-dev.txt`.
+- Missing transformation unit tests added:
+  - `tests/spark/test_bronze_load.py` (`add_ingestion_metadata`, `events_dataframe`);
+  - `conform_accounts` and `conform_cash_advances` in `test_silver_transforms.py`.
+
+  Every function in the `transforms`, `audit`, `rules`, `checks` and `reconcile` modules, plus bronze's metadata helpers, now has Spark unit tests. The catalog-bound bronze functions (watermark, partition write) are covered by the end-to-end runs.
+- DAG test fix: it read DAGs with `DagBag.get_dag()`, which in Airflow 3 queries the metadata database. It now uses `DagBag.dags` (in memory).
+- ADR 012.
+
+**Verification result:**
+- **Local CI stand-in.** The workflow steps ran in a clean `python:3.11.16-slim-bookworm` container with `openjdk-17-jre-headless` (17.0.21), against a clean copy of the repo with no `.env`.
+  - **First run: 3 DAG tests failed** with `sqlite3.OperationalError: no such table: dag`. That's the `get_dag()` issue above, which the Airflow container hid because its metadata database exists.
+  - **After the fix, from scratch:** ruff `All checks passed!` and `85 files already formatted`; install 195 s; pytest **69 passed, 30 skipped** (the access tests, which need the live stack) in 97.7 s; 344 s wall in total.
+- **`pre-commit run --all-files`:** all 8 hooks `Passed`, with no files modified.
+- **Other suites:**
+  - `make test-container` (Airflow container): **43 passed**.
+  - `make access-test`: **30 passed**.
+  - Local `pytest`: 26 passed, 30 skipped.
+- **Not verified:** the workflow hasn't run on GitHub Actions. The repository has no GitHub remote, and the GitHub CLI isn't installed. The SPEC's "Done when: CI passes" is met only by the local stand-in until it's pushed.
 
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.

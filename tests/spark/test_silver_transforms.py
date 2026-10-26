@@ -12,6 +12,8 @@ from jobs.silver import rules
 from jobs.silver.transforms import (
     FAILURE_REASON,
     age_band,
+    conform_accounts,
+    conform_cash_advances,
     conform_customers,
     conform_events,
     conform_transactions,
@@ -182,3 +184,27 @@ def test_parent_flag_handles_missing_parent_table(spark) -> None:
     df = spark.createDataFrame([("A1",)], "account_id STRING")
     empty = spark.createDataFrame([], "account_id STRING")
     assert with_parent_flag(df, "account_id", empty, "account_id").select(F.col(rules.HAS_PARENT)).first()[0] is False
+
+
+def test_conform_accounts_converts_to_utc(spark) -> None:
+    df = spark.createDataFrame(
+        [("A1", "C1", "savings", "active", datetime(2026, 9, 29, 8, 0), datetime(2026, 9, 30, 8, 0))],
+        "account_id STRING, customer_id STRING, account_type STRING, status STRING, opened_at TIMESTAMP_NTZ, "
+        "updated_at TIMESTAMP_NTZ",
+    )
+    row = conform_accounts(df, date(2026, 9, 30)).first()
+    assert (row["opened_at"], row["updated_at"]) == (datetime(2026, 9, 29, 0, 0), datetime(2026, 9, 30, 0, 0))
+    assert (row["account_type"], row["_logical_date"]) == ("savings", date(2026, 9, 30))
+
+
+def test_conform_cash_advances_keeps_null_repaid_at(spark) -> None:
+    df = spark.createDataFrame(
+        [("ADV1", "C1", Decimal("100.00"), datetime(2026, 9, 1, 9, 0), date(2026, 10, 1), None, "active",
+          datetime(2026, 9, 1, 9, 0))],
+        "advance_id STRING, customer_id STRING, amount DECIMAL(12,2), requested_at TIMESTAMP_NTZ, due_date DATE, "
+        "repaid_at TIMESTAMP_NTZ, status STRING, updated_at TIMESTAMP_NTZ",
+    )  # fmt: skip
+    row = conform_cash_advances(df, date(2026, 9, 1)).first()
+    assert row["requested_at"] == datetime(2026, 9, 1, 1, 0)
+    assert row["repaid_at"] is None
+    assert (row["amount"], row["due_date"]) == (Decimal("100.00"), date(2026, 10, 1))

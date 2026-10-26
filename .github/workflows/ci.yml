@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+  test:
+    # Unit tests, Spark transformation tests and the DAG integrity test. The serving access test needs the live
+    # stack and skips here; it runs with `make access-test`.
+    runs-on: ubuntu-24.04
+    env:
+      AIRFLOW_HOME: ${{ github.workspace }}/.airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/dags
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            docker/airflow/requirements.txt
+            requirements-dev.txt
+      - name: Install (same pins as the Airflow image)
+        run: >
+          pip install "apache-airflow==3.3.2" -r docker/airflow/requirements.txt -r requirements-dev.txt
+          --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.11.txt
+      - name: pytest
+        run: python -m pytest -q -p no:cacheprovider

@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Days 1 and 2, D3-AM and D3-MID are done and verified on Apple Silicon. That covers the platform, generator, bronze, silver, DQ, gold, the `ledgerlake_daily` Airflow DAG, serving with role-based access, and the time-travel, schema-evolution and maintenance commands. See [docs/PROGRESS.md](docs/PROGRESS.md). CI and the final docs come next.
+> **Status:** Days 1 and 2, D3-AM, D3-MID and D3-PM are done and verified on Apple Silicon. CI has passed in a clean local stand-in container, but hasn't yet run on GitHub because there's no remote. See [docs/PROGRESS.md](docs/PROGRESS.md). The final documentation block (D3-EVE) comes next.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -70,7 +70,7 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make dq-gate-demo date=2026-10-04` | Runs `ledgerlake_daily` with a simulated `null_amount` defect: `dq_silver` fails, `gold` and `dq_gold` become `upstream_failed`, and the failure is logged in `lake.ops.pipeline_runs`. Stored data isn't changed; run `make run` for the same date afterwards. |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
 | `make test-container` | Runs the Spark unit tests and DAG integrity tests inside the Airflow container |
-| `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first) |
+| `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first). Spark and DAG tests are skipped locally unless PySpark and Airflow are installed. |
 
 ## Synthetic data
 `make seed` generates the following, reproducibly (fixed seed):
@@ -164,6 +164,20 @@ The matrix and the test that proves it are in [docs/access_control.md](docs/acce
 - **`warn`:** freshness, and a quarantine rate of at most 5%.
 
 Each run writes one row per check to `lake.ops.dq_results` (run_id, logical_date, table, check_name, severity, passed, failed_rows, details, checked_at). A failed `error` check makes the task exit 1, so Airflow marks downstream tasks `upstream_failed`. `warn` failures are only logged. Details are in [ADR 006](docs/decisions/006-data-quality-module.md).
+
+## Tests and CI
+| Suite | Where it runs | What it covers |
+|---|---|---|
+| `tests/unit` | locally (`make test`), CI | generator, extract helpers, DQ gate, serving contract (no Spark) |
+| `tests/spark` | container (`make test-container`), CI | every silver, gold, publish and demo transformation, bronze metadata, DQ checks, reconciliation, MERGE change detection |
+| `tests/dags` | container, CI | `ledgerlake_daily` imports cleanly, task order, retries, callbacks, business date |
+| `tests/integration` | container after a publish (`make access-test`) | serving roles: what `analyst` and `engineer` can and cannot read |
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on every push and pull request:
+- **`lint`:** ruff check and ruff format check.
+- **`test`:** Python 3.11 plus Temurin 17, installing the same pinned packages as the Airflow image (Airflow 3.3.2 constraints, PySpark 3.5.9), then `pytest` over unit, Spark and DAG tests. The integration access test needs the live stack, so it skips in CI.
+
+Pre-commit runs ruff and basic file hygiene. Set it up with `pip install -r requirements-dev.txt && pre-commit install`.
 
 ## Notes
 - Postgres and MongoDB init scripts run only on an empty volume. Run `make clean` to re-initialise them.
