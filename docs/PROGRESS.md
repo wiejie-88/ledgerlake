@@ -12,6 +12,7 @@
 | D3-AM | Done | 2026-10-26 |
 | D3-MID | Done | 2026-10-26 |
 | D3-PM | Done locally; **GitHub run pending** (no remote yet) | 2026-10-26 |
+| D3-EVE | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -405,6 +406,44 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
   - Local `pytest`: 26 passed, 30 skipped.
 - **Not verified:** the workflow hasn't run on GitHub Actions. The repository has no GitHub remote, and the GitHub CLI isn't installed. The SPEC's "Done when: CI passes" is met only by the local stand-in until it's pushed.
 
+## D3-EVE: README, architecture diagram, data dictionary, ADRs, runbook, measured metrics
+
+**What was built:**
+- `README.md` rewritten:
+  - a pitch and an architecture diagram (Mermaid);
+  - a "What it demonstrates" table mapping features to the SPEC §1 skills (chosen by the project owner; no job posting is in the repo);
+  - prerequisites, a quick start, measured results only, Make targets, a short how-it-works section, project layout, tests and CI.
+- `docs/architecture.md`: data-flow, DAG and runtime diagrams (Mermaid), a step-by-step idempotency table and a layer table.
+- `docs/data_dictionary.md`: every source, MongoDB, bronze, quarantine, silver, gold, ops and serving table, with columns and types from the live schemas, keys, grain, PII markers and failure reasons.
+- `docs/runbook.md`: start and stop, daily runs, re-runs and backfills, DQ failure triage, quarantine review, serving and password rotation, maintenance, troubleshooting, fresh start.
+- ADRs:
+  - 013, MinIO and the AWS migration path (SPEC key decision 1, could-have 10);
+  - 014, the Iceberg JDBC catalog (key decision 2);
+  - 015, Spark local mode in Airflow (key decision 3);
+  - `docs/decisions/README.md`, an index of all 15.
+- `docker-compose.yml` no longer hard-codes the project `name`. The project name is the folder name, so a clone elsewhere gets its own volumes.
+- **Fix:** `quality/run.py` replaced a run's DQ results with `DELETE … WHERE run_id = X`. Because `dq_silver` and `dq_gold` share the Airflow run id, `dq_gold` deleted the silver results. The delete now also filters on the suite's own tables.
+
+**Verification result:**
+- **All 4 Mermaid diagrams** parse and render to SVG with Mermaid 11.4.1, checked in a browser. The README diagram's subgraph title was shortened after it overlapped a node.
+- **Fresh copy following only the README.** The working tree was copied to a new folder, without `.env`, as its own Compose project with its own volumes. The main stack was stopped (data kept) to free the ports. All 8 quick-start steps exited 0:
+
+  | Step | Wall time | Result |
+  |---|---|---|
+  | `make up` | 37 s | cached image layers |
+  | `make smoke` | 19 s | |
+  | `make seed` | 15 s | fingerprint `10236acea734ec3e158b3f82776a3216`, identical |
+  | `make run date=2026-09-29` | 178 s | 7/7 tasks, both DQ gates passed, reconciliation 0 |
+  | `make run date=2026-09-30` | 171 s | same |
+  | `make access-test` | 1 s | 30 passed |
+  | `make demo` | 24 s | |
+  | `make maintenance` | 49 s | 26 tables; physical data files 292 → 289 |
+
+  The demo's time-travel audit showed 2026-09-29 completed spend at 91,960.60 MYR as first reported, against 95,201.51 now: +3,240.91 from 99 status changes. Schema evolution showed `schema_id` 0 → 1, with 36,174 events without `referral_source` and 14,429 with it.
+- **The fresh-run metrics exposed the DQ results bug:** `ops.dq_results` held 20 rows per DAG run instead of 52. After the fix, on the fresh stack, running silver, gold, then silver again under one run id left **52 rows (32 silver, 20 gold)**.
+- **Cleanup:** the fresh copy's stack and its 3 volumes were removed, and the main stack was restarted with its data.
+- **First-build time:** the 491 s for a first-ever `make up` is the D1-AM measurement. The fresh-copy run reused cached image layers, so it doesn't re-measure a cold build.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -430,6 +469,10 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Limited time-travel window:** time travel reaches only the last 5 snapshots per table after maintenance.
 - **Shared run id:** manual maintenance runs share `run_id = manual` in `ops.maintenance_log`; `maintained_at` tells them apart.
 - **Maintenance isn't scheduled:** it's a manual `make` command, not part of `ledgerlake_daily`.
+- **Lost silver DQ results in earlier DAG runs:** DAG runs before the D3-EVE fix (D2-EVE through D3-MID) lost their `dq_silver` rows in `ops.dq_results`. The gate itself worked: `dq_silver` passed or failed before `dq_gold` ran.
+- **Backfill command untested:** `airflow backfill create` is documented in the runbook but wasn't exercised. Backfills were verified as sequential `make run date=…`.
+- **No GitHub CI run yet:** CI hasn't run on GitHub Actions (no remote); it passed in a local clean-container stand-in.
+- **Acceptance gap (SPEC §9, third criterion):** every injected defect type is quarantined with a reason, and the counts reconcile with the source (D2-AM). But `ops.dq_results` records only an aggregate `quarantine_rate` check per run, not one row per defect type. A per-reason count check would close this.
 - **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.
 - **Coarse tick duration:** `generate_tick` records `duration_s` from bash `$SECONDS`, which has 1-second resolution.
 - **Manual runs need the business date:** manual runs without `business_date` take the data interval Airflow infers from the trigger time. Seen in the test: the 10-24 to 10-25 interval for a run triggered on 2026-10-26. Always pass `business_date` for manual runs; `make run` does this.

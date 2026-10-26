@@ -70,7 +70,9 @@ def store_results(spark: SparkSession, run_id: str, logical_date: date, results:
         "check_name STRING, severity STRING, passed BOOLEAN, failed_rows BIGINT, details STRING, "
         "checked_at TIMESTAMP) USING iceberg"
     )
-    spark.sql(f"DELETE FROM {DQ_RESULTS} WHERE run_id = '{run_id.replace(chr(39), '')}'")
+    # dq_silver and dq_gold share one Airflow run_id, so only replace this suite's own tables for the run.
+    tables = ", ".join(f"'{t}'" for t in sorted({r.table for r in results}))
+    spark.sql(f"DELETE FROM {DQ_RESULTS} WHERE run_id = '{run_id.replace(chr(39), '')}' AND `table` IN ({tables})")
     rows = [
         (run_id, logical_date, r.table, r.check_name, str(r.severity), r.passed, r.failed_rows, r.details)
         for r in results

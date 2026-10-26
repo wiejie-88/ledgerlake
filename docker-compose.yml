@@ -1,7 +1,6 @@
-name: ledgerlake
-
 # All images are pinned and have native arm64 builds; see docs/decisions/001-versions.md.
-# Host ports bind to 127.0.0.1 only.
+# Host ports bind to 127.0.0.1 only. The Compose project name is the checkout's folder name, so two clones in
+# different folders get separate volumes (run only one at a time: they share host ports).
 
 services:
   postgres:

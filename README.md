@@ -1,185 +1,168 @@
 # LedgerLake
 
-A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
+A batch lakehouse for a fictional Malaysian consumer fintech app, built to run on one laptop:
+- synthetic operational data in **Postgres** and app events in **MongoDB**;
+- extracted incrementally into **Apache Iceberg** tables on **MinIO**;
+- transformed with **PySpark** (bronze → silver → gold) and checked by a data-quality gate;
+- orchestrated by **Airflow**;
+- published to a **Postgres serving database** where an `analyst` role can't see personal data.
 
-> **Status:** Days 1 and 2, D3-AM, D3-MID and D3-PM are done and verified on Apple Silicon. CI has passed in a clean local stand-in container, but hasn't yet run on GitHub because there's no remote. See [docs/PROGRESS.md](docs/PROGRESS.md). The final documentation block (D3-EVE) comes next.
+Everything is pinned, synthetic and reproducible. The specification is [docs/SPEC.md](docs/SPEC.md), and the block-by-block build log with every measurement is [docs/PROGRESS.md](docs/PROGRESS.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    GEN[Generator<br/>seed / tick] --> PG[(Postgres<br/>source)]
+    GEN --> MG[(MongoDB<br/>app_events)]
+    PG -- "JDBC, updated_at watermark" --> BR
+    MG -- "event_ts watermark" --> BR
+    subgraph LAKE["Iceberg lakehouse on MinIO"]
+        BR[bronze] --> SI[silver]
+        BR --> QU[quarantine]
+        SI --> GO[gold]
+    end
+    GO -- "after DQ gates" --> SV[(Postgres serving<br/>analyst: masked<br/>engineer: full)]
+```
+
+Airflow DAG `ledgerlake_daily`: `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold → publish`. Detailed diagrams are in [docs/architecture.md](docs/architecture.md).
+
+## What it demonstrates
+
+Features are mapped to the skills listed in SPEC §1.
+
+| Skill | Where to see it |
+|---|---|
+| Apache Iceberg | JDBC catalog on Postgres; MERGE INTO upserts; partition overwrite; **schema evolution** (`make demo-schema-evolution`); **time travel** for audit (`make demo-time-travel`); compaction and snapshot expiry (`make maintenance`) |
+| Spark | PySpark transformations as pure, unit-tested functions: `jobs/silver/transforms.py`, `jobs/gold/transforms.py` |
+| Airflow | `dags/ledgerlake_daily.py`: business-date scheduling, retries, failure callback, DQ gate stops downstream tasks |
+| SQL and NoSQL sources | Incremental extracts from Postgres (`updated_at`) and MongoDB (`event_ts`) with idempotent watermarks ([ADR 004](docs/decisions/004-incremental-extract-watermarks.md)) |
+| Data quality | Quarantine with failure reasons; 32 silver and 20 gold checks; `error` vs `warn` severity; mart-to-silver reconciliation; results in `ops.dq_results` |
+| Data governance and access control | PII hashed in silver and isolated in `customers_pii`; `analyst` / `engineer` roles; masked view; 30-test access proof ([docs/access_control.md](docs/access_control.md)) |
+| Documentation | [Architecture](docs/architecture.md), [data dictionary](docs/data_dictionary.md), [runbook](docs/runbook.md), [15 ADRs](docs/decisions/README.md) |
+| Reproducibility | Pinned images, JARs (SHA-256) and packages; deterministic generator (same fingerprint on every seed); CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) |
 
 ## Prerequisites
-- Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
-- The `docker` command on your PATH. Check with `docker version`. If it isn't found, either enable Docker Desktop's CLI tools installation or add `/Applications/Docker.app/Contents/Resources/bin` to your PATH.
-- `make` (included with macOS Command Line Tools).
-- Free host ports 5432, 8080, 9000, 9001 and 27017. To use different ports, change them in `.env`.
+- **Docker Desktop.** Apple Silicon and x86 both work. In **Settings → Resources**, set **Memory to about 8 GB**.
+- **The `docker` command on your PATH.** Check with `docker version`. If it isn't found, add `/Applications/Docker.app/Contents/Resources/bin` to your PATH, or enable Docker Desktop's CLI tools option.
+- **`make`** (included with macOS Command Line Tools) and **`git`**.
+- **About 8 GB of free disk** for images and data.
+- **Free host ports** 5432, 8080, 9000, 9001 and 27017. To use others, edit them in `.env` after the first `make up`.
 
 ## Quick start
+From a fresh clone:
 ```bash
-make up      # first run builds the Airflow image; creates .env from .env.example if missing
-make smoke   # Iceberg smoke test
-make seed    # 60 days of synthetic source data in Postgres and MongoDB
-make run date=2026-09-29      # the whole pipeline in Airflow (ledgerlake_daily) for one business date
+make up                       # builds the Airflow image, starts everything, creates .env from .env.example
+make smoke                    # Iceberg smoke test: create, write, read a table on MinIO
+make seed                     # 60 days of synthetic source data (2026-08-01 to 2026-09-29)
+make run date=2026-09-29      # full pipeline for one business date (first run = initial load)
 make run date=2026-09-30      # next day: tick, bronze, silver, DQ, gold, DQ, publish
-make access-test              # prove what the analyst and engineer roles can read in the serving database
+make access-test              # logs in as analyst and engineer; proves who can read what
 make demo                     # Iceberg time-travel audit + schema-evolution demo
-make maintenance              # compact files, expire old snapshots; file counts before/after in ops.maintenance_log
+make maintenance              # compact files, expire old snapshots; logs file counts before/after
 ```
+- **Change the placeholder passwords** in `.env` before sharing anything.
+- **Airflow UI:** http://localhost:8080 (no login; bound to localhost only).
+- **MinIO console:** http://localhost:9001.
+- **Serving database:** `psql -h localhost -U analyst serving`.
 
-Each layer can also be run on its own:
-```bash
-make bronze date=2026-09-29   # first run: full initial load into Iceberg bronze
-make tick date=2026-09-30     # one more day of source data
-make bronze date=2026-09-30   # incremental load (only rows changed since the previous high-water mark)
-make silver date=2026-09-29   # silver + quarantine for each loaded date, in date order
-make silver date=2026-09-30
-make silver-report            # quarantine reasons, PII layout, schema evolution evidence
-make dq layer=silver date=2026-09-30          # 32 DQ checks; results in lake.ops.dq_results
-make gold date=2026-09-30                     # dims + fact (MERGE) and marts
-make dq layer=gold date=2026-09-30            # 20 gold checks, incl. freshness and mart-vs-silver reconciliation
-```
+To stop, run `make down`, which keeps the data. `make clean` deletes all data volumes and asks first. Day-to-day operations, re-runs, backfills and troubleshooting are in the [runbook](docs/runbook.md).
 
-The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow image. It took about 8 minutes on the reference MacBook Air.
+## Measured results
+Every figure below was measured, not estimated. The quick start figures come from a **fresh copy of this repository (no `.env`) following only the steps above**, on a MacBook Air (Apple Silicon, Docker Desktop with 8 GB, 8 CPUs), on 2026-10-26. The full log of every block is in [docs/PROGRESS.md](docs/PROGRESS.md).
 
-| Service | URL / port | Credentials |
+**Quick start timings**
+
+| Step | Result | Wall time |
 |---|---|---|
-| Airflow UI | http://localhost:8080 | none (local-only, all users are admin) |
-| MinIO console | http://localhost:9001 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env` |
-| Postgres | localhost:5432 (`source`, `iceberg_catalog`, `serving`, `airflow`) | `POSTGRES_USER` / `POSTGRES_PASSWORD` |
-| MongoDB | localhost:27017 (`app.app_events`) | `MONGO_ROOT_USER` / `MONGO_ROOT_PASSWORD` |
+| `make up` | all services healthy | 37 s with cached image layers; **491 s** for the first-ever build (image downloads plus a 4.38 GB image) |
+| `make smoke` | `SMOKE TEST PASSED` (Spark 3.5.9, Iceberg 1.10.2, Java 17.0.20) | 19 s |
+| `make seed` | 2,000 customers, 99,897 transactions, 50,007 events; fingerprint `10236ace…` (identical on every seed) | 15 s |
+| `make run date=2026-09-29` | initial load; 7/7 tasks success | 178 s |
+| `make run date=2026-09-30` | incremental day; 7/7 tasks success | 171 s |
+| `make access-test` | 30/30 passed | 1 s |
+| `make demo` | time-travel audit and schema evolution | 24 s |
+| `make maintenance` | 26 tables; physical data files 292 → 289 | 49 s |
+
+**Pipeline (after the two days above)**
+
+| Measure | Value |
+|---|---|
+| Silver rows: transactions / customers / app events | 99,293 / 2,005 / 50,603 |
+| Gold: fact rows / `mart_daily_spend` / `mart_customer_features` | 99,293 / 610 / 3,840 |
+| Quarantined transaction keys by reason | duplicate 600, unknown category 400, negative amount 420, null amount 399, orphan account 374, plus 99 late-update audit rows |
+| Injected vs quarantined defects (D2-AM check) | equal for every defect type |
+| DQ per run | 32 silver and 20 gold checks; all passed both days; mart reconciliation `mismatched_groups=0` |
+| Incremental-day task durations | extract_bronze 18.4 s, silver 43.3 s, dq_silver 24.3 s, gold 23.4 s, dq_gold 19.2 s, publish 7.6 s |
+| Re-running a date | all 26 tables have identical row counts (D2-EVE); silver and gold commit no new snapshot (ADR 011) |
+| Time-travel audit, 2026-09-29 | completed spend 91,960.60 MYR as first reported, against 95,201.51 MYR now: +3,240.91 from 99 late status changes |
+| Data files written per daily run | 1,074 before the write-efficiency change, 57 after (ADR 011) |
+| A failing `error` DQ check (simulated) | `dq_silver` failed; `gold` and `dq_gold` `upstream_failed`; failure logged by the callback (D2-EVE, before `publish` was added) |
+| Tests | CI stand-in (clean container): ruff clean, 69 passed and 30 skipped; container 43 passed; access 30 passed |
 
 ## Make targets
 | Target | What it does |
 |---|---|
-| `make up` | Builds and starts all services, and waits until they're healthy |
-| `make down` | Stops services; data is kept |
-| `make clean` | Stops services and **deletes all data volumes** (asks first) |
-| `make ps` | Service status |
-| `make logs` | Follows logs (`make logs s=airflow` for one service) |
-| `make smoke` | Creates, writes and reads an Iceberg table on MinIO through the JDBC catalog |
-| `make seed` | Rebuilds the synthetic source history (2026-08-01 to 2026-09-29), wiping existing source data. Logs row counts and defect counts. |
-| `make tick date=2026-09-30` | Adds one day of data and updates some existing rows. A day that was already generated is skipped. |
-| `make bronze date=2026-09-29` | Extracts all five sources incrementally into `lake.bronze.*` and replaces that date's partition. Re-running the same date gives the same counts. |
-| `make silver date=2026-09-29` | Validates and deduplicates bronze partition D, writes rejected rows to `quarantine.*` with a `failure_reason`, and MERGEs the rest into `silver.*`. Re-runs change nothing. |
-| `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
-| `make gold date=2026-09-30` | Builds `gold.dim_date`, `gold.dim_customer` (MERGE on a row hash), `gold.fact_transactions` (MERGE, partitioned by day) and the three marts (rebuilt) from current silver |
-| `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
-| `make publish date=2026-10-04` | Publishes the 3 gold marts and `customer_profile` to the `serving` database in one transaction, and re-applies `serving/*.sql` (tables, masked view, roles, grants) |
-| `make access-test` | Logs in as `analyst` and `engineer` and proves what each can and cannot read (30 tests). See [docs/access_control.md](docs/access_control.md). |
-| `make demo-time-travel [date=2026-10-04]` | Audit demo: reads `gold.fact_transactions` as of the snapshot built for that business date (`VERSION AS OF` and `TIMESTAMP AS OF`) and shows what has been restated since. Defaults to the previous business date. |
-| `make demo-schema-evolution` | Shows `silver.app_events`' schema id change when `referral_source` was added, and how old and new rows read |
-| `make demo` | Both demos |
-| `make maintenance [retain=5]` | For every lake table: compact data files, rewrite manifests, and expire snapshots, keeping the last N. Logs snapshot, current, referenced and physical file counts before and after to `lake.ops.maintenance_log`. |
-| `make run date=2026-10-03` | Runs the whole `ledgerlake_daily` DAG for one business date (`airflow dags test`). Re-running a date changes nothing. |
-| `make dq-gate-demo date=2026-10-04` | Runs `ledgerlake_daily` with a simulated `null_amount` defect: `dq_silver` fails, `gold` and `dq_gold` become `upstream_failed`, and the failure is logged in `lake.ops.pipeline_runs`. Stored data isn't changed; run `make run` for the same date afterwards. |
-| `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
-| `make test-container` | Runs the Spark unit tests and DAG integrity tests inside the Airflow container |
-| `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first). Spark and DAG tests are skipped locally unless PySpark and Airflow are installed. |
+| `make up` / `make down` / `make clean` | Start (build and wait for healthy) / stop (keep data) / stop and **delete all data** (asks first) |
+| `make ps` / `make logs [s=airflow]` | Service status / follow logs |
+| `make smoke` | Iceberg smoke test through the JDBC catalog on MinIO |
+| `make seed` / `make tick date=D` | Rebuild the 60-day source history / add one day (skipped if already generated) |
+| `make run date=D` | Run the whole `ledgerlake_daily` DAG for business date D (idempotent) |
+| `make bronze date=D`, `make silver date=D`, `make gold date=D`, `make publish date=D` | Run one layer by hand (in that order) |
+| `make dq layer=silver\|gold date=D` | Run a DQ suite; exits 1 on an `error` failure; results in `lake.ops.dq_results` |
+| `make dq-gate-demo date=D` | The DAG with a simulated defect (in memory only): `dq_silver` fails, downstream `upstream_failed` |
+| `make silver-report` | Quarantine reasons, PII column layout, schema-evolution evidence |
+| `make access-test` | 30 checks of what `analyst` and `engineer` can and cannot read |
+| `make demo` / `make demo-time-travel [date=D]` / `make demo-schema-evolution` | Iceberg demos |
+| `make maintenance [retain=5]` | Compaction, manifest rewrite and snapshot expiry; before/after file counts in `lake.ops.maintenance_log` |
+| `make reset-lake` | Drop every lake table (asks first) |
+| `make test` / `make lint` | Local unit tests / ruff (`pip install -r requirements-dev.txt`) |
+| `make test-container` | Spark and DAG tests inside the Airflow container |
 
-## Synthetic data
-`make seed` generates the following, reproducibly (fixed seed):
-- about 2,000 customers, 3,000 accounts, 100k transactions and 600 cash advances in Postgres `source`;
-- about 50k app events in MongoDB `app.app_events`.
+## How it works (short)
+- **Synthetic sources** (`generator/`): about 2,000 customers, 100k transactions and 50k app events.
+  - About 2.2% of transactions carry a deliberate defect: duplicate, null or negative amount, unknown category, or orphan account.
+  - Late-arriving settlements, and a schema drift on 2026-09-14 (`referral_source`).
+  - The generator is deterministic ([ADR 003](docs/decisions/003-synthetic-generator.md)).
+- **Bronze:** raw rows plus ingestion metadata, partitioned by business date. The extract window starts at the high-water mark of earlier partitions, so re-runs are exact ([ADR 004](docs/decisions/004-incremental-extract-watermarks.md)).
+- **Silver:**
+  - validation rules send failing rows to `quarantine.*` with a reason;
+  - deduplicates on the business key;
+  - converts timestamps from Malaysia time to UTC;
+  - email and phone become salted SHA-256 hashes, and date of birth an age band;
+  - names and contacts stay only in `silver.customers_pii`;
+  - `referral_source` is added to `silver.app_events` by Iceberg schema evolution without rewriting old files ([ADR 005](docs/decisions/005-silver-quarantine-and-pii.md)).
+- **Gold:**
+  - `fact_transactions` (partitioned by day) and `dim_customer` (SCD1) are upserted with MERGE INTO, sending only changed rows ([ADR 011](docs/decisions/011-write-efficiency.md));
+  - plus `dim_date`;
+  - three marts: daily spend, advance-repayment cohorts, customer features ([ADR 007](docs/decisions/007-gold-model-and-reconciliation.md)).
+- **Data quality:** `quality/` runs after silver and after gold. A failed `error` check stops downstream tasks; `warn` only logs. Gold marts are reconciled with silver group by group ([ADR 006](docs/decisions/006-data-quality-module.md)).
+- **Serving:** `publish` replaces the marts and `customer_profile` in one Postgres transaction. `analyst` reads the marts and a masked view (`S***`); `engineer` reads everything; neither can write ([ADR 009](docs/decisions/009-serving-and-access-control.md)).
+- **Operations:** every task attempt is logged in `lake.ops.pipeline_runs` ([ADR 008](docs/decisions/008-airflow-orchestration.md)). Maintenance and time travel are covered in [ADR 010](docs/decisions/010-time-travel-and-maintenance.md).
 
-All names are fictional combinations of Malaysian names. Emails use reserved `example.*` domains. Amounts are in MYR.
-
-About 2.2% of transactions carry a deliberate defect: duplicate row, null amount, negative amount, unknown category, or unknown account. About 0.5% of app events are duplicated. Pending transactions settle 1–14 days later, which produces late-arriving updates to old rows. From 2026-09-14 onward, app events gain `properties.referral_source` (schema drift).
-
-Postgres timestamps are Malaysia local time (UTC+8) with no time zone. MongoDB `event_ts` is UTC. Each generated day is recorded in `source.generator_log` along with its injected defect counts. Design notes are in [ADR 003](docs/decisions/003-synthetic-generator.md).
-
-## Verify the platform
-1. Run `make up`. It exits 0 once postgres, mongodb and airflow are healthy and `minio-init` has exited 0.
-2. Run `docker compose exec airflow uname -m`. It should print `aarch64` on Apple Silicon.
-3. Run `make smoke`. It should end with `SMOKE TEST PASSED`, then show:
-   - a `lake | ops | smoke_test` row from the Postgres catalog, and
-   - the table's Parquet and metadata files under `warehouse/ops/smoke_test/` in MinIO.
-4. Run `make seed`. It logs one line per generated day, then:
-   - `seed total` lines with the rows inserted and defects injected, and
-   - `seed measured in database` lines with counts taken directly from Postgres and MongoDB.
-
-   For each defect type, the injected and measured counts should match. Running `make seed` again should give the same `transactions.fingerprint_md5`.
-5. Run `make bronze date=2026-09-29` twice. Each run logs one line per table, with its window, `rows_extracted`, `partition_rows`, `table_rows` and the new watermark. The counts should be identical across the two runs.
-
-## Bronze and watermarks
-For logical date D (a Malaysia business day), each source is extracted with `low < updated_at < end of D`, using `event_ts` for MongoDB:
-- `low` is the highest value already landed in bronze partitions **before** D, or no lower bound on the first load.
-- The result replaces bronze partition D. A re-run of D therefore uses the same window and can't duplicate rows.
-- `lake.ops.watermarks` records each entity's high-water mark after every run.
-
-Bronze keeps raw source types and adds `_ingested_at`, `_source`, `_batch_id` and `_logical_date`. The details and trade-offs are in [ADR 004](docs/decisions/004-incremental-extract-watermarks.md).
-
-## Silver and quarantine
-For each logical date, silver reads that bronze partition and runs these steps for each entity:
-- **Validate:** accepted values for status, category, direction and types; non-null keys; `amount > 0`; and parents that exist (transaction → account → customer).
-- **Deduplicate:** keep the newest version per business key.
-- **Quarantine:** write rejected rows to `quarantine.<entity>` with a `failure_reason`, for example `duplicate_row`, `null_amount`, `negative_amount`, `unknown_category` or `orphan_account`. When a transaction's late-arriving update replaces an older version, that older version is kept there as `superseded_by_late_update`.
-- **Conform and merge:** convert timestamps to UTC and MERGE into `silver.*`.
-
-Personal data is protected:
-- `silver.customers` has only `email_hash` and `phone_hash` (salted SHA-256, with the salt from `PII_SALT` in `.env`) and an `age_band`.
-- Name, email, phone and date of birth live only in `silver.customers_pii`.
-
-`silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
-
-## Orchestration (Airflow)
-`ledgerlake_daily` runs `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold → publish`.
-- **Business date:** each run processes one Malaysia business day. That's the `business_date` param when given, otherwise the data interval of a midnight Malaysia-time schedule.
-- **Idempotent:** every task is idempotent for its business date, so re-runs and backfills are safe.
-- **Retries:** build tasks retry twice, 1 minute apart. DQ tasks don't retry, because a failed check won't fix itself.
-- **Failure handling:** a failed `error` DQ check fails its task, and Airflow marks everything downstream `upstream_failed`.
-- **Run log:** every task run is logged in `lake.ops.pipeline_runs` (run_id, dag_id, task_id, logical_date, rows_in, rows_out, duration_s, status). Jobs write their own success rows, and failure and retry callbacks write the rest.
-- **Paused by default:** the DAG is paused at creation. Use `make run date=…` for one date, or unpause it in the UI for the daily schedule.
-
-Details are in [ADR 008](docs/decisions/008-airflow-orchestration.md).
-
-## Gold
-| Table | Grain | Built by |
-|---|---|---|
-| `gold.fact_transactions` | one transaction (partitioned by `days(txn_ts)`) | MERGE, newest `updated_at` wins |
-| `gold.dim_customer` | one customer (no PII) | MERGE INTO on a row hash (SCD type 1) |
-| `gold.dim_date` | one day, 2024–2027 | created once |
-| `gold.mart_daily_spend` | day × category | total and average spend, transaction count, customers |
-| `gold.mart_advance_repayment` | monthly request cohort | repayment rate (overall and among due advances), average days late |
-| `gold.mart_customer_features` | customer × month | spend level and daily volatility, salary credits and 3-month income regularity, advance usage |
-
-Spend means completed debits, and days and months are Malaysia business dates. Every gold run is checked by `make dq layer=gold`, which recomputes each mart from silver and requires `mismatched_groups=0`, plus key, referential and freshness checks. Details are in [ADR 007](docs/decisions/007-gold-model-and-reconciliation.md).
-
-## Time travel and maintenance
-- **Time travel (audit):** "What did gold report for 2026-10-04 when it was built?" `make demo-time-travel date=2026-10-04` reads the fact table as of that build. In the verification run it reported 87,060.21 MYR of completed spend then, against 89,979.40 MYR now, because of 113 late-arriving status changes since.
-- **Maintenance:** `make maintenance` compacts small files and expires snapshots beyond the last 5. In the verification run it reduced physical data files from 4,119 to 2,707, and `silver.transactions` went from 841 data files to 1. Physical object counts are checked against Iceberg's references, so orphaned files would show up.
-
-Time travel reaches only snapshots that maintenance kept. Details are in [ADR 010](docs/decisions/010-time-travel-and-maintenance.md).
-
-## Serving and access control
-After `dq_gold` passes, `publish` replaces the contents of four tables in the Postgres `serving` database in one transaction: the three marts and `customer_profile`.
-
-| Role (login, password from `.env`) | Can read | Cannot |
-|---|---|---|
-| `analyst` | the 3 marts, and `v_customer_profile_masked` (name initial + `***`, age band, state, income band) | `customer_profile` or any of its columns, other databases, any write or CREATE, `SET ROLE engineer` |
-| `engineer` | everything in `serving`, including `customer_profile` personal data | write, CREATE, other databases |
-
-For example, the same customer appears to `engineer` as `Siva a/l Subramaniam | siva.subramaniam3700@example.org` and to `analyst` as `S***`. Connect from the host with `psql -h localhost -U analyst serving`.
-
-The matrix and the test that proves it are in [docs/access_control.md](docs/access_control.md). The design is in [ADR 009](docs/decisions/009-serving-and-access-control.md).
-
-## Data quality
-`quality/` is a lightweight PySpark DQ module. The gold suite has 20 `error` checks (see Gold above). The silver suite has 32 checks:
-- **`error`:** not-null and unique business keys, accepted values for status, category and type columns, `amount > 0`, and referential integrity (transaction → account → customer, plus advances and events → customer).
-- **`warn`:** freshness, and a quarantine rate of at most 5%.
-
-Each run writes one row per check to `lake.ops.dq_results` (run_id, logical_date, table, check_name, severity, passed, failed_rows, details, checked_at). A failed `error` check makes the task exit 1, so Airflow marks downstream tasks `upstream_failed`. `warn` failures are only logged. Details are in [ADR 006](docs/decisions/006-data-quality-module.md).
+## Project layout
+```
+dags/            Airflow DAG (wiring only)
+generator/       synthetic source data (seed / tick)
+jobs/            extract, bronze, silver, gold, publish, demo, maintenance, common helpers
+quality/         DQ checks, suites, severity gate, mart reconciliation
+serving/         serving SQL: tables, masked view, roles and grants
+docker/          Airflow image, Postgres and MongoDB init scripts
+tests/           unit/, spark/, dags/, integration/
+docs/            SPEC, PROGRESS, architecture, data dictionary, runbook, access control, decisions/
+```
 
 ## Tests and CI
-| Suite | Where it runs | What it covers |
+| Suite | Runs | Covers |
 |---|---|---|
-| `tests/unit` | locally (`make test`), CI | generator, extract helpers, DQ gate, serving contract (no Spark) |
-| `tests/spark` | container (`make test-container`), CI | every silver, gold, publish and demo transformation, bronze metadata, DQ checks, reconciliation, MERGE change detection |
-| `tests/dags` | container, CI | `ledgerlake_daily` imports cleanly, task order, retries, callbacks, business date |
-| `tests/integration` | container after a publish (`make access-test`) | serving roles: what `analyst` and `engineer` can and cannot read |
+| `tests/unit` | locally (`make test`), CI | generator, extract helpers, DQ gate, serving contract |
+| `tests/spark` | container (`make test-container`), CI | every transformation, DQ checks, reconciliation, MERGE change detection |
+| `tests/dags` | container, CI | DAG imports, task order, retries, callbacks, business date |
+| `tests/integration` | after a publish (`make access-test`) | serving access for each role |
 
-GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on every push and pull request:
-- **`lint`:** ruff check and ruff format check.
-- **`test`:** Python 3.11 plus Temurin 17, installing the same pinned packages as the Airflow image (Airflow 3.3.2 constraints, PySpark 3.5.9), then `pytest` over unit, Spark and DAG tests. The integration access test needs the live stack, so it skips in CI.
-
-Pre-commit runs ruff and basic file hygiene. Set it up with `pip install -r requirements-dev.txt && pre-commit install`.
+GitHub Actions runs a ruff lint job and a test job on every push. The test job uses Python 3.11, Temurin 17, and the same pinned Airflow/PySpark versions as the image. Pre-commit (`pre-commit install`) runs ruff and file-hygiene hooks ([ADR 012](docs/decisions/012-ci-and-test-layers.md)).
 
 ## Notes
-- Postgres and MongoDB init scripts run only on an empty volume. Run `make clean` to re-initialise them.
-- Pinned versions and the reasons for them are in [docs/decisions/001-versions.md](docs/decisions/001-versions.md). The MinIO image choice is in [docs/decisions/002-minio-community-image.md](docs/decisions/002-minio-community-image.md).
-- All data is synthetic. Secrets live in `.env`, which is git-ignored. `.env.example` holds placeholders only.
+- All data is synthetic. Emails use reserved `example.*` domains. Secrets live in `.env`, which is git-ignored.
+- Postgres and MongoDB init scripts run only on empty volumes. Use `make clean` to re-initialise.
+- Moving to AWS (S3, Glue catalog, EMR or Glue jobs, MWAA, RDS) is a configuration change, described in [ADR 013](docs/decisions/013-minio-and-aws-migration-path.md).
