@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Day 1, silver (D2-AM), the DQ module (D2-MID) and gold (D2-PM) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). The Airflow DAG and serving come in later blocks.
+> **Status:** Days 1 and 2 are done and verified on Apple Silicon: the platform, generator, bronze, silver, DQ, gold and the `ledgerlake_daily` Airflow DAG. See [docs/PROGRESS.md](docs/PROGRESS.md). Serving with role-based access and the Day 3 work come next.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -15,6 +15,12 @@ A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and M
 make up      # first run builds the Airflow image; creates .env from .env.example if missing
 make smoke   # Iceberg smoke test
 make seed    # 60 days of synthetic source data in Postgres and MongoDB
+make run date=2026-09-29      # the whole pipeline in Airflow (ledgerlake_daily) for one business date
+make run date=2026-09-30      # next day: tick, bronze, silver, DQ, gold, DQ
+```
+
+Each layer can also be run on its own:
+```bash
 make bronze date=2026-09-29   # first run: full initial load into Iceberg bronze
 make tick date=2026-09-30     # one more day of source data
 make bronze date=2026-09-30   # incremental load (only rows changed since the previous high-water mark)
@@ -22,7 +28,6 @@ make silver date=2026-09-29   # silver + quarantine for each loaded date, in dat
 make silver date=2026-09-30
 make silver-report            # quarantine reasons, PII layout, schema evolution evidence
 make dq layer=silver date=2026-09-30          # 32 DQ checks; results in lake.ops.dq_results
-make dq-gate-demo date=2026-09-30             # Airflow: a failing error check stops the downstream task
 make gold date=2026-09-30                     # dims + fact (MERGE) and marts
 make dq layer=gold date=2026-09-30            # 20 gold checks, incl. freshness and mart-vs-silver reconciliation
 ```
@@ -52,9 +57,10 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
 | `make gold date=2026-09-30` | Builds `gold.dim_date`, `gold.dim_customer` (MERGE on a row hash), `gold.fact_transactions` (MERGE, partitioned by day) and the three marts (rebuilt) from current silver |
 | `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
-| `make dq-gate-demo date=2026-09-30` | Runs the `ledgerlake_dq_gate_demo` DAG twice: clean (both tasks succeed), then with a simulated `null_amount` defect (`dq_silver` fails, `gold` is `upstream_failed`) |
+| `make run date=2026-10-03` | Runs the whole `ledgerlake_daily` DAG for one business date (`airflow dags test`). Re-running a date changes nothing. |
+| `make dq-gate-demo date=2026-10-04` | Runs `ledgerlake_daily` with a simulated `null_amount` defect: `dq_silver` fails, `gold` and `dq_gold` become `upstream_failed`, and the failure is logged in `lake.ops.pipeline_runs`. Stored data isn't changed; run `make run` for the same date afterwards. |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
-| `make test-spark` | Runs the Spark unit tests inside the Airflow container |
+| `make test-container` | Runs the Spark unit tests and DAG integrity tests inside the Airflow container |
 | `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first) |
 
 ## Synthetic data
@@ -101,6 +107,17 @@ Personal data is protected:
 - Name, email, phone and date of birth live only in `silver.customers_pii`.
 
 `silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
+
+## Orchestration (Airflow)
+`ledgerlake_daily` runs `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold`. The `publish` task is added in D3-AM.
+- **Business date:** each run processes one Malaysia business day. That's the `business_date` param when given, otherwise the data interval of a midnight Malaysia-time schedule.
+- **Idempotent:** every task is idempotent for its business date, so re-runs and backfills are safe.
+- **Retries:** build tasks retry twice, 1 minute apart. DQ tasks don't retry, because a failed check won't fix itself.
+- **Failure handling:** a failed `error` DQ check fails its task, and Airflow marks everything downstream `upstream_failed`.
+- **Run log:** every task run is logged in `lake.ops.pipeline_runs` (run_id, dag_id, task_id, logical_date, rows_in, rows_out, duration_s, status). Jobs write their own success rows, and failure and retry callbacks write the rest.
+- **Paused by default:** the DAG is paused at creation. Use `make run date=…` for one date, or unpause it in the UI for the daily schedule.
+
+Details are in [ADR 008](docs/decisions/008-airflow-orchestration.md).
 
 ## Gold
 | Table | Grain | Built by |

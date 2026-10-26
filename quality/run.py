@@ -19,6 +19,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from jobs.common.iceberg import qualified
+from jobs.common.pipeline_runs import record_run, run_context
 from jobs.common.spark import CATALOG, get_spark
 from quality.checks import Loader, evaluate
 from quality.gate import CheckResult, DataQualityError, blocking_failures, enforce, warnings
@@ -120,6 +121,11 @@ def main(argv: list[str] | None = None) -> None:
     spark = get_spark(f"dq_{args.layer}")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.ops")
     results = run_suite(spark, args.layer, args.date, run_id, args.simulate_defect)
+    if not blocking_failures(results):
+        # rows_in = checks evaluated, rows_out = checks passed. Failures are recorded by the Airflow callback.
+        duration = round(time.monotonic() - started, 1)
+        ctx = run_context(f"dq_{args.layer}")
+        record_run(spark, ctx, args.date, len(results), sum(r.passed for r in results), duration)
     spark.stop()
 
     log.info(

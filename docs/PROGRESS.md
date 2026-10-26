@@ -8,6 +8,7 @@
 | D2-AM | Done | 2026-10-26 |
 | D2-MID | Done | 2026-10-26 |
 | D2-PM | Done | 2026-10-26 |
+| D2-EVE | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -236,6 +237,48 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
   | 2026-09 | 304 | 113 | 5 | 0.3717 | 0.75 (24 due) | 0.0 |
   | 2026-10 | 16 | 0 | 0 | 0.0 | none yet | — |
 
+## D2-EVE: Airflow DAG `ledgerlake_daily`
+
+**What was built:**
+- `dags/ledgerlake_daily.py`: `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold`.
+  - Tasks are BashOperators calling the existing CLIs.
+  - The business date is the `business_date` param, else the data interval start in Malaysia time (`CronDataIntervalTimetable`, midnight Malaysia time).
+  - Retries: 2 (1-minute delay) for build tasks, 0 for DQ tasks. A 30-minute timeout, `max_active_runs=1` and `catchup=False`.
+  - A `simulate_defect` param drives the gate demo.
+- `jobs/common/pipeline_runs.py`: `lake.ops.pipeline_runs` (run_id, dag_id, task_id, logical_date, rows_in, rows_out, duration_s, status, recorded_at).
+  - Spark jobs append their own success row.
+  - The generator prints `ROWS_OUT=` and the task records it through the CLI.
+- `jobs/common/airflow_callbacks.py`: failure and retry callbacks that record `failed` / `up_for_retry` rows in a subprocess.
+- `tests/dags/test_ledgerlake_daily.py`: 5 DAG integrity tests. `make test-container` runs these and the Spark tests.
+- New Make targets `make run date=D` and `make dq-gate-demo date=D` (the latter now uses `ledgerlake_daily`).
+- `dags/ledgerlake_dq_gate_demo.py` was removed; `ledgerlake_daily` replaces it.
+- ADR 008.
+
+**Verification result.** Runs with `airflow dags test`, continuing from the D2-PM lake state through 2026-10-02.
+- **Tests:** `make test-container` gives 32 passed in 35.0 s (27 Spark, 5 DAG integrity). After the summary, py4j prints a harmless "Logging error" at interpreter shutdown. Locally, `pytest` gives 23 passed and ruff is clean.
+- **`make run date=2026-10-03`:** all 6 tasks `success`, run marked successful, 210 s wall.
+
+  | Task | rows_in | rows_out | duration_s |
+  |---|---|---|---|
+  | generate_tick | — | 2,698 | 1.0 |
+  | extract_bronze | 2,830 | 2,830 | 22.6 |
+  | silver | 2,830 | 2,787 | 58.4 |
+  | dq_silver | 32 | 32 | 33.7 |
+  | gold | 104,383 | 8,146 | 38.6 |
+  | dq_gold | 20 | 20 | 25.2 |
+
+  The reconciliation checks reported `mismatched_groups=0`.
+- **Re-run of `make run date=2026-10-03`:** success in 196 s.
+  - The tick logged `already generated; nothing to do` (rows_out 0).
+  - Every silver table and `gold.dim_customer` / `gold.fact_transactions` reported `inserted=0 updated=0`.
+  - **Row counts of all 26 tables (bronze, silver, quarantine, gold and the source tables) were identical before and after the re-run.** For example, silver.transactions 104,383, gold.fact_transactions 104,383, quarantine.transactions 2,735, gold.mart_customer_features 5,625.
+- **`make dq-gate-demo date=2026-10-04`** (simulated `null_amount`, 150 s):
+  - `generate_tick`, `extract_bronze` and `silver` succeeded.
+  - `dq_silver` logged `DQ GATE FAILED: 1 error-severity DQ check(s) failed: silver.transactions:not_null:amount (1 rows)`. The failure callback logged `recorded status=failed for task_id=dq_silver`.
+  - `airflow tasks states-for-dag-run` showed **`dq_silver failed`, `gold upstream_failed`, `dq_gold upstream_failed`**, and the run was marked failed.
+- **Recovery, `make run date=2026-10-04`:** all 6 tasks `success` (215 s). The tick was skipped as already generated, and both DQ gates passed.
+- **`lake.ops.pipeline_runs`** holds 22 rows for these four runs: one per task attempt, including `2026-10-04 | dq_silver | failed | duration_s 34.0` from the callback.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -252,7 +295,11 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Silver run time:** silver takes 70–85 s per day. Most of it is Spark start-up and one MERGE per table. Acceptable at this scale.
 - **Empty snapshots:** a no-op MERGE (a re-run) still commits an empty Iceberg snapshot.
 - **DQ run time:** the silver DQ suite takes 40–46 s, because each check is a separate Spark action (ADR 006).
-- **Demo DAG:** `ledgerlake_dq_gate_demo` is a demo. The production DAG `ledgerlake_daily` arrives in D2-EVE.
+- **Demo DAG removed:** the D2-MID demo DAG `ledgerlake_dq_gate_demo` was removed in D2-EVE, and `make dq-gate-demo` now runs `ledgerlake_daily` with `simulate_defect`. The test command `make test-spark` was renamed `make test-container`.
+- **No publish task yet:** `ledgerlake_daily` has no `publish` task until D3-AM.
+- **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.
+- **Coarse tick duration:** `generate_tick` records `duration_s` from bash `$SECONDS`, which has 1-second resolution.
+- **Manual runs need the business date:** manual runs without `business_date` take the data interval Airflow infers from the trigger time. Seen in the test: the 10-24 to 10-25 interval for a run triggered on 2026-10-26. Always pass `business_date` for manual runs; `make run` does this.
 - **Gold uses current silver:** gold is rebuilt from current silver, so a backfill of an older date doesn't produce point-in-time marts (ADR 007).
 - **Short history:** `income_regularity_3m` is low for the first months, because there are fewer than 3 months of history.
 - **Slow tests:** the generator tests take about 50 s because they run the in-memory seed three times.

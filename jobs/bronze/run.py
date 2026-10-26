@@ -23,6 +23,7 @@ from jobs.bronze.load import (
     update_watermark,
     write_partition,
 )
+from jobs.common.pipeline_runs import record_run, run_context
 from jobs.common.spark import CATALOG, get_spark
 from jobs.common.time_windows import local_day_end, utc_day_end
 from jobs.extract.sources import ENTITIES, Entity, fetch_events, incremental_sql, jdbc_options
@@ -80,13 +81,17 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    batch_id = args.batch_id or f"manual__{uuid.uuid4()}"
+    ctx = run_context("extract_bronze")
+    batch_id = args.batch_id or (ctx.run_id if ctx.run_id != "manual" else f"manual__{uuid.uuid4()}")
+    started = time.monotonic()
     spark = get_spark("bronze")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.bronze")
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.ops")
     log.info("bronze: logical_date=%s batch_id=%s", args.date, batch_id)
-    for name in args.entity or ENTITIES:
-        load_entity(spark, ENTITIES[name], args.date, batch_id)
+    metrics = [load_entity(spark, ENTITIES[name], args.date, batch_id) for name in args.entity or ENTITIES]
+    rows_in = sum(m["rows_extracted"] for m in metrics)
+    rows_out = sum(m["partition_rows"] for m in metrics)
+    record_run(spark, ctx, args.date, rows_in, rows_out, round(time.monotonic() - started, 1))
     spark.stop()
 
 

@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq dq-gate-demo reset-lake test-spark test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq run dq-gate-demo reset-lake test-container test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -60,17 +60,21 @@ dq: ## Run a DQ suite and store results in ops.dq_results: make dq layer=silver 
 	@test -n "$(layer)" -a -n "$(date)" || (echo "usage: make dq layer=silver date=YYYY-MM-DD" && exit 2)
 	$(COMPOSE) exec airflow python -m quality.run --layer $(layer) --date $(date)
 
-dq-gate-demo: ## Airflow demo: clean run, then a simulated defect that stops downstream: make dq-gate-demo date=...
+run: ## Run the full ledgerlake_daily DAG for one business date: make run date=YYYY-MM-DD
+	@test -n "$(date)" || (echo "usage: make run date=YYYY-MM-DD" && exit 2)
+	$(COMPOSE) exec airflow airflow dags test ledgerlake_daily -c '{"business_date": "$(date)"}'
+
+dq-gate-demo: ## Run ledgerlake_daily with a simulated DQ defect: dq_silver fails, downstream upstream_failed
 	@test -n "$(date)" || (echo "usage: make dq-gate-demo date=YYYY-MM-DD" && exit 2)
-	-$(COMPOSE) exec airflow airflow dags test ledgerlake_dq_gate_demo $(date)
-	-$(COMPOSE) exec airflow airflow dags test ledgerlake_dq_gate_demo $(date) -c '{"simulate_defect": "null_amount"}'
+	-$(COMPOSE) exec airflow airflow dags test ledgerlake_daily \
+		-c '{"business_date": "$(date)", "simulate_defect": "null_amount"}'
 
 reset-lake: ## DROP all bronze/silver/quarantine/gold/ops tables (asks first)
 	@read -p "This drops every lake table and deletes its files. Type 'yes' to continue: " ans && [ "$$ans" = yes ]
 	$(COMPOSE) exec airflow python -m jobs.common.reset_lake
 
-test-spark: ## Run the Spark unit tests inside the Airflow container
-	$(COMPOSE) exec airflow python -m pytest -q tests/spark
+test-container: ## Run the Spark and DAG tests inside the Airflow container
+	$(COMPOSE) exec airflow python -m pytest -q tests/spark tests/dags
 
 test: ## Run unit tests locally (needs: pip install -r requirements-dev.txt)
 	python -m pytest -q

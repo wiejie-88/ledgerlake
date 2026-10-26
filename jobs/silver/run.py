@@ -28,6 +28,7 @@ from jobs.common.iceberg import (
     qualified,
     table_exists,
 )
+from jobs.common.pipeline_runs import record_run, run_context
 from jobs.common.spark import CATALOG, get_spark
 from jobs.silver import rules
 from jobs.silver.transforms import (
@@ -198,13 +199,19 @@ def main(argv: list[str] | None = None) -> None:
     salt = os.environ.get("PII_SALT", "")
     if not salt:
         raise SystemExit("PII_SALT is not set; add it to .env (see .env.example)")
+    started = time.monotonic()
     spark = get_spark("silver")
     for namespace in ("silver", "quarantine"):
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{namespace}")
     log.info("silver: logical_date=%s", args.date)
-    for entity in ENTITIES:
-        if not args.entity or entity.name in args.entity:
-            process_entity(spark, entity, args.date, salt)
+    metrics = [
+        process_entity(spark, entity, args.date, salt)
+        for entity in ENTITIES
+        if not args.entity or entity.name in args.entity
+    ]
+    rows_in = sum(m["rows_in"] for m in metrics)
+    rows_out = sum(m["rows_valid"] for m in metrics)
+    record_run(spark, run_context("silver"), args.date, rows_in, rows_out, round(time.monotonic() - started, 1))
     spark.stop()
 
 

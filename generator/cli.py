@@ -42,8 +42,12 @@ def main(argv: list[str] | None = None) -> None:
             for name, value in measured.items():
                 log.info("seed measured in database: %s=%s", name, value)
         else:
-            tick_day(store, events, args.date)
+            batch = tick_day(store, events, args.date)
+            rows_out = sum(batch.inserted_counts().values()) if batch else 0
     finally:
         store.close()
         events.close()
     log.info("%s finished in %.1fs", args.command, time.monotonic() - started)
+    if args.command == "tick":
+        # stdout (logs go to stderr): lets the Airflow task record rows_out in ops.pipeline_runs.
+        print(f"ROWS_OUT={rows_out}")
