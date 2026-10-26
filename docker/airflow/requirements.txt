@@ -1,0 +1,5 @@
+# Extra Python packages for the Airflow image. Pin every version.
+# Installed with Airflow's constraints file (see docker/airflow/Dockerfile).
+pyspark==3.5.9
+pymongo==4.18.1
+psycopg2-binary==2.9.13
