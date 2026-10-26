@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq run dq-gate-demo reset-lake test-container test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq publish access-test run dq-gate-demo reset-lake test-container test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -59,6 +59,13 @@ gold: ## Build gold (dims + fact via MERGE, marts rebuilt) from current silver: 
 dq: ## Run a DQ suite and store results in ops.dq_results: make dq layer=silver date=YYYY-MM-DD
 	@test -n "$(layer)" -a -n "$(date)" || (echo "usage: make dq layer=silver date=YYYY-MM-DD" && exit 2)
 	$(COMPOSE) exec airflow python -m quality.run --layer $(layer) --date $(date)
+
+publish: ## Publish gold marts + customer profile to the serving database: make publish date=YYYY-MM-DD
+	@test -n "$(date)" || (echo "usage: make publish date=YYYY-MM-DD" && exit 2)
+	$(COMPOSE) exec airflow python -m jobs.publish.run --date $(date)
+
+access-test: ## Prove what the analyst and engineer roles can and cannot read in the serving database
+	$(COMPOSE) exec airflow python -m pytest -v -p no:cacheprovider tests/integration
 
 run: ## Run the full ledgerlake_daily DAG for one business date: make run date=YYYY-MM-DD
 	@test -n "$(date)" || (echo "usage: make run date=YYYY-MM-DD" && exit 2)

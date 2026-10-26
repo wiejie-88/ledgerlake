@@ -9,6 +9,7 @@
 | D2-MID | Done | 2026-10-26 |
 | D2-PM | Done | 2026-10-26 |
 | D2-EVE | Done | 2026-10-26 |
+| D3-AM | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -279,6 +280,42 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Recovery, `make run date=2026-10-04`:** all 6 tasks `success` (215 s). The tick was skipped as already generated, and both DQ gates passed.
 - **`lake.ops.pipeline_runs`** holds 22 rows for these four runs: one per task attempt, including `2026-10-04 | dq_silver | failed | duration_s 34.0` from the callback.
 
+## D3-AM: publish step, serving roles, masked view, access test
+
+**What was built:**
+- `serving/01_tables.sql`: schema `serving`, the 3 mart tables and `customer_profile`.
+- `serving/02_views.sql`: `v_customer_profile_masked`, with the name initial + `***`, age band, state and income band.
+- `serving/03_roles_grants.sql`: the `analyst` and `engineer` login roles. PUBLIC privileges are revoked on all 4 databases. `analyst` gets SELECT on the marts and the masked view; `engineer` gets SELECT on everything in `serving`.
+- `jobs/publish/` (`make publish date=D`, and the new DAG task `publish` after `dq_gold`):
+  - applies the SQL files and sets role passwords from `.env`;
+  - builds `customer_profile` from `silver.customers_pii` joined to `gold.dim_customer`;
+  - TRUNCATEs and inserts all 4 tables in one transaction;
+  - records its row in `ops.pipeline_runs`.
+- Tests:
+  - `tests/unit/test_serving_contract.py` (3 tests): the publish columns match the DDL, only `customer_profile` holds PII, and the masked view exposes only 5 columns.
+  - `tests/spark/test_publish.py` (2 tests).
+  - `tests/integration/test_serving_access.py` (30 tests, `make access-test`): logs in as each role.
+- `docs/access_control.md` (access matrix) and ADR 009.
+- Configuration: `.env.example` gained `ANALYST_PASSWORD` and `ENGINEER_PASSWORD`, and the local `.env` had the same placeholders appended. Compose passes `SERVING_PG_DSN` and both passwords to Airflow and mounts `serving/`.
+
+**Verification result:**
+- **Tests:** `make test-container` gives 34 passed (29 Spark, 5 DAG integrity, with `publish` in the chain). Locally, the contract tests pass and the 30 integration tests skip without a database.
+- **`make publish date=2026-10-04`** (13 s wall, job 8.8 s): applied the 3 SQL files and published mart_daily_spend 650, mart_advance_repayment 3, mart_customer_features 5,712 and customer_profile 2,025 rows.
+- **`make access-test`:** **30 passed.**
+  - The analyst reads the 3 marts and the masked view, and every `name_masked` matches `^\S\*\*\*$`.
+  - The analyst is denied `customer_profile` for `*`, `customer_id`, `full_name`, `email`, `phone` and `date_of_birth`, and `has_column_privilege` is false for all 4 PII columns.
+  - The objects the analyst can read are exactly the 3 marts plus the masked view, with no PII column among them.
+  - The analyst can't INSERT, DELETE, CREATE (in `serving` or `public`) or `SET ROLE engineer`.
+  - Both roles get `permission denied for database` on `source`, `iceberg_catalog` and `airflow`.
+  - The engineer reads all PII columns, and UPDATE, TRUNCATE and CREATE are denied.
+  - The first run had 1 failure, caused by a bug in my test query (`has_table_privilege` was evaluated on `serving.pg_statistic`). After the fix, all 30 passed.
+- **`\dp serving.*`** shows `customer_profile` with `engineer=r` only. The marts and the view have `analyst=r` and `engineer=r`.
+- **Same customer, two roles:**
+  - engineer: `C000001 | Siva a/l Subramaniam | siva.subramaniam3700@example.org | 25_34 | Pahang`
+  - analyst: `C000001 | S*** | 25_34 | Pahang | 2k_4k`
+- **Re-publishing 2026-10-04:** row counts and an MD5 over all rows were identical for all 4 serving tables.
+- **`make run date=2026-10-05`:** all **7** tasks `success`, including `publish` (660 / 3 / 5,787 / 2,030 rows), in 237 s wall. `make access-test` afterwards: 30 passed.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -296,7 +333,9 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Empty snapshots:** a no-op MERGE (a re-run) still commits an empty Iceberg snapshot.
 - **DQ run time:** the silver DQ suite takes 40–46 s, because each check is a separate Spark action (ADR 006).
 - **Demo DAG removed:** the D2-MID demo DAG `ledgerlake_dq_gate_demo` was removed in D2-EVE, and `make dq-gate-demo` now runs `ledgerlake_daily` with `simulate_defect`. The test command `make test-spark` was renamed `make test-container`.
-- **No publish task yet:** `ledgerlake_daily` has no `publish` task until D3-AM.
+- **Driver-side publish:** publish collects the serving tables to the Spark driver. That's fine for about 8.4k rows; larger volumes would need COPY plus a table swap (ADR 009).
+- **PII copy:** `customer_profile` is a second copy of personal data, readable by `engineer` only and rebuilt on every publish.
+- **Access-control scope:** access control covers the serving database only. Lake storage (MinIO, Iceberg) uses platform credentials that analysts don't have.
 - **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.
 - **Coarse tick duration:** `generate_tick` records `duration_s` from bash `$SECONDS`, which has 1-second resolution.
 - **Manual runs need the business date:** manual runs without `business_date` take the data interval Airflow infers from the trigger time. Seen in the test: the 10-24 to 10-25 interval for a run triggered on 2026-10-26. Always pass `business_date` for manual runs; `make run` does this.

@@ -50,6 +50,7 @@ print('scala-library:', jars); sys.exit(0 if jars else 1)"
 COPY --chown=airflow:root generator /opt/ledgerlake/generator
 COPY --chown=airflow:root jobs /opt/ledgerlake/jobs
 COPY --chown=airflow:root quality /opt/ledgerlake/quality
+COPY --chown=airflow:root serving /opt/ledgerlake/serving
 COPY --chown=airflow:root dags /opt/ledgerlake/dags
 ENV PYTHONPATH=/opt/ledgerlake
 WORKDIR /opt/ledgerlake

@@ -16,7 +16,7 @@ except ImportError:  # older import path
 from jobs.common.airflow_callbacks import business_date, on_failure, on_retry
 
 DAGS_DIR = Path(__file__).resolve().parents[2] / "dags"
-ORDER = ["generate_tick", "extract_bronze", "silver", "dq_silver", "gold", "dq_gold"]
+ORDER = ["generate_tick", "extract_bronze", "silver", "dq_silver", "gold", "dq_gold", "publish"]
 
 
 @pytest.fixture(scope="module")

@@ -95,6 +95,10 @@ services:
       MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
       # Salt for hashing email and phone in silver
       PII_SALT: ${PII_SALT}
+      # Serving database (publish job) and the passwords it sets for the analyst / engineer roles
+      SERVING_PG_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/serving
+      ANALYST_PASSWORD: ${ANALYST_PASSWORD:-}
+      ENGINEER_PASSWORD: ${ENGINEER_PASSWORD:-}
       # Iceberg catalog and object storage (read by jobs/common/spark.py)
       LAKE_CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg_catalog
       LAKE_CATALOG_USER: ${POSTGRES_USER}
@@ -111,6 +115,7 @@ services:
       - ./generator:/opt/ledgerlake/generator
       - ./jobs:/opt/ledgerlake/jobs
       - ./quality:/opt/ledgerlake/quality
+      - ./serving:/opt/ledgerlake/serving
       - ./dags:/opt/ledgerlake/dags
       - ./tests:/opt/ledgerlake/tests
       - ./pyproject.toml:/opt/ledgerlake/pyproject.toml:ro

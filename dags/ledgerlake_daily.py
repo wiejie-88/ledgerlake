@@ -1,4 +1,4 @@
-"""ledgerlake_daily: generate one day of source data, then bronze -> silver -> DQ -> gold -> DQ.
+"""ledgerlake_daily: generate one day of source data, then bronze -> silver -> DQ -> gold -> DQ -> publish.
 
 Business date = the ``business_date`` param when given, else the data interval start in Malaysia time (the
 schedule runs at midnight Malaysia time for the day that just ended). Every task is idempotent for its
@@ -37,7 +37,7 @@ default_args = {
 
 with DAG(
     dag_id="ledgerlake_daily",
-    description="LedgerLake daily batch: source tick, bronze, silver, DQ, gold, DQ",
+    description="LedgerLake daily batch: source tick, bronze, silver, DQ, gold, DQ, publish to serving",
     schedule=CronDataIntervalTimetable("0 0 * * *", timezone=MYT),
     start_date=datetime(2026, 10, 1, tzinfo=MYT),
     catchup=False,
@@ -79,4 +79,6 @@ with DAG(
         bash_command=f'python -m quality.run --layer gold --date "{BUSINESS_DATE}" --run-id "{{{{ run_id }}}}"',
     )
 
-    generate_tick >> extract_bronze >> silver >> dq_silver >> gold >> dq_gold
+    publish = BashOperator(task_id="publish", bash_command=f'python -m jobs.publish.run --date "{BUSINESS_DATE}"')
+
+    generate_tick >> extract_bronze >> silver >> dq_silver >> gold >> dq_gold >> publish

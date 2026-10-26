@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Days 1 and 2 are done and verified on Apple Silicon: the platform, generator, bronze, silver, DQ, gold and the `ledgerlake_daily` Airflow DAG. See [docs/PROGRESS.md](docs/PROGRESS.md). Serving with role-based access and the Day 3 work come next.
+> **Status:** Days 1 and 2 plus D3-AM are done and verified on Apple Silicon: the platform, generator, bronze, silver, DQ, gold, the `ledgerlake_daily` Airflow DAG, and publishing to a serving database with role-based access. See [docs/PROGRESS.md](docs/PROGRESS.md). The time-travel and maintenance demos, CI and the final docs come next.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -16,7 +16,8 @@ make up      # first run builds the Airflow image; creates .env from .env.exampl
 make smoke   # Iceberg smoke test
 make seed    # 60 days of synthetic source data in Postgres and MongoDB
 make run date=2026-09-29      # the whole pipeline in Airflow (ledgerlake_daily) for one business date
-make run date=2026-09-30      # next day: tick, bronze, silver, DQ, gold, DQ
+make run date=2026-09-30      # next day: tick, bronze, silver, DQ, gold, DQ, publish
+make access-test              # prove what the analyst and engineer roles can read in the serving database
 ```
 
 Each layer can also be run on its own:
@@ -57,6 +58,8 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
 | `make gold date=2026-09-30` | Builds `gold.dim_date`, `gold.dim_customer` (MERGE on a row hash), `gold.fact_transactions` (MERGE, partitioned by day) and the three marts (rebuilt) from current silver |
 | `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
+| `make publish date=2026-10-04` | Publishes the 3 gold marts and `customer_profile` to the `serving` database in one transaction, and re-applies `serving/*.sql` (tables, masked view, roles, grants) |
+| `make access-test` | Logs in as `analyst` and `engineer` and proves what each can and cannot read (30 tests). See [docs/access_control.md](docs/access_control.md). |
 | `make run date=2026-10-03` | Runs the whole `ledgerlake_daily` DAG for one business date (`airflow dags test`). Re-running a date changes nothing. |
 | `make dq-gate-demo date=2026-10-04` | Runs `ledgerlake_daily` with a simulated `null_amount` defect: `dq_silver` fails, `gold` and `dq_gold` become `upstream_failed`, and the failure is logged in `lake.ops.pipeline_runs`. Stored data isn't changed; run `make run` for the same date afterwards. |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
@@ -109,7 +112,7 @@ Personal data is protected:
 `silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
 
 ## Orchestration (Airflow)
-`ledgerlake_daily` runs `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold`. The `publish` task is added in D3-AM.
+`ledgerlake_daily` runs `generate_tick → extract_bronze → silver → dq_silver → gold → dq_gold → publish`.
 - **Business date:** each run processes one Malaysia business day. That's the `business_date` param when given, otherwise the data interval of a midnight Malaysia-time schedule.
 - **Idempotent:** every task is idempotent for its business date, so re-runs and backfills are safe.
 - **Retries:** build tasks retry twice, 1 minute apart. DQ tasks don't retry, because a failed check won't fix itself.
@@ -130,6 +133,18 @@ Details are in [ADR 008](docs/decisions/008-airflow-orchestration.md).
 | `gold.mart_customer_features` | customer × month | spend level and daily volatility, salary credits and 3-month income regularity, advance usage |
 
 Spend means completed debits, and days and months are Malaysia business dates. Every gold run is checked by `make dq layer=gold`, which recomputes each mart from silver and requires `mismatched_groups=0`, plus key, referential and freshness checks. Details are in [ADR 007](docs/decisions/007-gold-model-and-reconciliation.md).
+
+## Serving and access control
+After `dq_gold` passes, `publish` replaces the contents of four tables in the Postgres `serving` database in one transaction: the three marts and `customer_profile`.
+
+| Role (login, password from `.env`) | Can read | Cannot |
+|---|---|---|
+| `analyst` | the 3 marts, and `v_customer_profile_masked` (name initial + `***`, age band, state, income band) | `customer_profile` or any of its columns, other databases, any write or CREATE, `SET ROLE engineer` |
+| `engineer` | everything in `serving`, including `customer_profile` personal data | write, CREATE, other databases |
+
+For example, the same customer appears to `engineer` as `Siva a/l Subramaniam | siva.subramaniam3700@example.org` and to `analyst` as `S***`. Connect from the host with `psql -h localhost -U analyst serving`.
+
+The matrix and the test that proves it are in [docs/access_control.md](docs/access_control.md). The design is in [ADR 009](docs/decisions/009-serving-and-access-control.md).
 
 ## Data quality
 `quality/` is a lightweight PySpark DQ module. The gold suite has 20 `error` checks (see Gold above). The silver suite has 32 checks:
