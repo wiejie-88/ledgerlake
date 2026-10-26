@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Day 1 and silver (D2-AM) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). DQ, gold, the Airflow DAG and serving come in later blocks.
+> **Status:** Day 1, silver (D2-AM) and the DQ module (D2-MID) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). Gold, the Airflow DAG and serving come in later blocks.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -21,6 +21,8 @@ make bronze date=2026-09-30   # incremental load (only rows changed since the pr
 make silver date=2026-09-29   # silver + quarantine for each loaded date, in date order
 make silver date=2026-09-30
 make silver-report            # quarantine reasons, PII layout, schema evolution evidence
+make dq layer=silver date=2026-09-30          # 32 DQ checks; results in lake.ops.dq_results
+make dq-gate-demo date=2026-09-30             # Airflow: a failing error check stops the downstream task
 ```
 
 The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow image. It took about 8 minutes on the reference MacBook Air.
@@ -46,6 +48,8 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make bronze date=2026-09-29` | Extracts all five sources incrementally into `lake.bronze.*` and replaces that date's partition. Re-running the same date gives the same counts. |
 | `make silver date=2026-09-29` | Validates and deduplicates bronze partition D, writes rejected rows to `quarantine.*` with a `failure_reason`, and MERGEs the rest into `silver.*`. Re-runs change nothing. |
 | `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
+| `make dq layer=silver date=2026-09-30` | Runs the silver DQ suite and stores one row per check in `lake.ops.dq_results`. Exits 1 if any `error` check fails. |
+| `make dq-gate-demo date=2026-09-30` | Runs the `ledgerlake_dq_gate_demo` DAG twice: clean (both tasks succeed), then with a simulated `null_amount` defect (`dq_silver` fails, `gold` is `upstream_failed`) |
 | `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
 | `make test-spark` | Runs the Spark unit tests inside the Airflow container |
 | `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first) |
@@ -94,6 +98,13 @@ Personal data is protected:
 - Name, email, phone and date of birth live only in `silver.customers_pii`.
 
 `silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
+
+## Data quality
+`quality/` is a lightweight PySpark DQ module. The silver suite has 32 checks:
+- **`error`:** not-null and unique business keys, accepted values for status, category and type columns, `amount > 0`, and referential integrity (transaction → account → customer, plus advances and events → customer).
+- **`warn`:** freshness, and a quarantine rate of at most 5%.
+
+Each run writes one row per check to `lake.ops.dq_results` (run_id, logical_date, table, check_name, severity, passed, failed_rows, details, checked_at). A failed `error` check makes the task exit 1, so Airflow marks downstream tasks `upstream_failed`. `warn` failures are only logged. Details are in [ADR 006](docs/decisions/006-data-quality-module.md).
 
 ## Notes
 - Postgres and MongoDB init scripts run only on an empty volume. Run `make clean` to re-initialise them.

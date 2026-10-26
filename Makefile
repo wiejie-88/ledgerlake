@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report reset-lake test-spark test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report dq dq-gate-demo reset-lake test-spark test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -51,6 +51,15 @@ silver: ## Build silver and quarantine from one bronze partition: make silver da
 
 silver-report: ## Quarantine reasons, silver counts, PII columns and schema evolution evidence
 	$(COMPOSE) exec airflow python -m jobs.silver.report
+
+dq: ## Run a DQ suite and store results in ops.dq_results: make dq layer=silver date=YYYY-MM-DD
+	@test -n "$(layer)" -a -n "$(date)" || (echo "usage: make dq layer=silver date=YYYY-MM-DD" && exit 2)
+	$(COMPOSE) exec airflow python -m quality.run --layer $(layer) --date $(date)
+
+dq-gate-demo: ## Airflow demo: clean run, then a simulated defect that stops downstream: make dq-gate-demo date=...
+	@test -n "$(date)" || (echo "usage: make dq-gate-demo date=YYYY-MM-DD" && exit 2)
+	-$(COMPOSE) exec airflow airflow dags test ledgerlake_dq_gate_demo $(date)
+	-$(COMPOSE) exec airflow airflow dags test ledgerlake_dq_gate_demo $(date) -c '{"simulate_defect": "null_amount"}'
 
 reset-lake: ## DROP all bronze/silver/quarantine/gold/ops tables (asks first)
 	@read -p "This drops every lake table and deletes its files. Type 'yes' to continue: " ans && [ "$$ans" = yes ]

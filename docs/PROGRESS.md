@@ -6,6 +6,7 @@
 | D1-PM | Done | 2026-10-26 |
 | D1-EVE | Done | 2026-10-26 |
 | D2-AM | Done | 2026-10-26 |
+| D2-MID | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -163,6 +164,31 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
   - All 45 of those files are still in the current table (66 files in total), so none were rewritten.
   - Rows without `referral_source`: 36,174, event dates 2026-08-01 to 09-13. Rows with it: 15,185, from 2026-09-14 to 10-01.
 
+## D2-MID: DQ module and `ops.dq_results`
+
+**What was built:**
+- `quality/checks.py`: check kinds `not_null`, `unique`, `accepted_values`, `positive`, `referential`, `freshness` and `quarantine_rate`.
+- `quality/suites.py`: the silver suite of 32 checks. 30 are `error`; freshness and quarantine rate are `warn`.
+- `quality/gate.py`: the severity gate, with no Spark.
+- `quality/run.py`: `make dq layer=silver date=D`. It runs the suite, stores results in `lake.ops.dq_results` (replacing the same run_id's rows), and exits 1 on an error failure. `--simulate-defect` adds a bad row in memory only.
+- `dags/ledgerlake_dq_gate_demo.py`: `dq_silver >> gold`, with a `simulate_defect` param. `make dq-gate-demo date=D` runs it.
+- Tests: 3 gate unit tests run locally, and 11 check tests run in the container.
+- `quality/` is copied into the image and mounted in Compose.
+- ADR 006.
+
+**Verification result** (lake state from the D2-AM run, logical date 2026-10-01):
+- **Tests:** `make test-spark` gives 20 passed in 34.0 s (9 silver, 11 quality). Locally, `pytest` gives 23 passed and ruff is clean.
+- **`make dq layer=silver date=2026-10-01`:** all 32 checks passed and the log printed `DQ GATE PASSED` (46.0 s).
+  - Freshness logged `latest=2026-10-01 required>=2026-09-30`.
+  - Quarantine rate logged `rejected=36 bronze_rows=1707 rate=0.0211`.
+  - The re-run (43.8 s) replaced the run's rows. `ops.dq_results` still holds exactly 32 rows for `manual__silver__2026-10-01`.
+- **`airflow dags test ledgerlake_dq_gate_demo 2026-10-01`** (clean): `dq_silver` was `success` (32/32 passed, 39.2 s), `gold` was `success`, and the DagRun was successful. Exit 0.
+- **The same DAG with `{"simulate_defect": "null_amount"}`:**
+  - The task logged `SIMULATED DEFECT null_amount added in memory (stored data unchanged)`, then `check=not_null:amount severity=error passed=False failed_rows=1`, then `DQ GATE FAILED: 1 error-severity DQ check(s) failed: silver.transactions:not_null:amount (1 rows)`.
+  - `airflow tasks states-for-dag-run` showed **`dq_silver failed` and `gold upstream_failed`**. The gold task never started, and the DagRun was marked failed. Exit 1.
+- **`ops.dq_results`** holds 3 runs: the manual run (32/32), the Airflow clean run (32/32), and the Airflow defect run (31/32), whose single failure row reads `silver.transactions | not_null:amount | error | false | 1`.
+- **Stored data is unchanged** after the simulation: `silver.transactions` has 100,860 rows, 0 NULL amounts and 0 `SIMULATED%` rows.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -178,5 +204,7 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Late-update auditing starts on day two:** `superseded_by_late_update` is detected only from the second loaded day onward, because the initial full load contains only the latest versions (ADR 005).
 - **Silver run time:** silver takes 70–85 s per day. Most of it is Spark start-up and one MERGE per table. Acceptable at this scale.
 - **Empty snapshots:** a no-op MERGE (a re-run) still commits an empty Iceberg snapshot.
+- **DQ run time:** the silver DQ suite takes 40–46 s, because each check is a separate Spark action (ADR 006).
+- **Demo DAG:** `ledgerlake_dq_gate_demo` is a demo. The production DAG `ledgerlake_daily` arrives in D2-EVE. The gold freshness check is added with the gold suite in D2-PM.
 - **Slow tests:** the generator tests take about 50 s because they run the in-memory seed three times.
 - **No `ops.pipeline_runs` yet:** that table and the run metrics written to it come with the Airflow DAG in D2-EVE.

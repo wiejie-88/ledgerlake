@@ -110,6 +110,7 @@ services:
     volumes:
       - ./generator:/opt/ledgerlake/generator
       - ./jobs:/opt/ledgerlake/jobs
+      - ./quality:/opt/ledgerlake/quality
       - ./dags:/opt/ledgerlake/dags
       - ./tests:/opt/ledgerlake/tests
       - ./pyproject.toml:/opt/ledgerlake/pyproject.toml:ro
