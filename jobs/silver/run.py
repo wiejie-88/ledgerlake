@@ -21,9 +21,8 @@ from pyspark.sql import functions as F
 
 from jobs.common.iceberg import (
     create_if_missing,
-    merge_insert_only,
+    insert_new,
     merge_latest,
-    merge_preview,
     overwrite_partition,
     qualified,
     table_exists,
@@ -102,19 +101,19 @@ def _write_events(kept: DataFrame, logical_date: date) -> list[str]:
     evolved = [c for c in columns if c not in base_columns]
     added = evolvable_keys(property_keys(kept), columns)
     if not added:
-        merge_insert_only(conform_events(kept, logical_date, evolved), table, "event_id")
+        insert_new(conform_events(kept, logical_date, evolved), table, "event_id")
         return []
 
     has_new_key = F.lit(False)
     for key in added:
         has_new_key = has_new_key | F.col("properties").getItem(key).isNotNull()
     cutoff = kept.where(has_new_key).agg(F.min("event_ts")).first()[0]
-    merge_insert_only(conform_events(kept.where(F.col("event_ts") < cutoff), logical_date, evolved), table, "event_id")
+    insert_new(conform_events(kept.where(F.col("event_ts") < cutoff), logical_date, evolved), table, "event_id")
     for key in added:
         spark.sql(f"ALTER TABLE {qualified(table)} ADD COLUMN {key} STRING")
         log.info("table=%s schema evolution: added column %s (first seen at event_ts=%s)", table, key, cutoff)
     rest = kept.where(F.col("event_ts") >= cutoff)
-    merge_insert_only(conform_events(rest, logical_date, evolved + added), table, "event_id")
+    insert_new(conform_events(rest, logical_date, evolved + added), table, "event_id")
     return added
 
 
@@ -165,8 +164,7 @@ def process_entity(spark: SparkSession, entity: SilverEntity, logical_date: date
                 "cash_advances": conform_cash_advances,
             }[entity.name]
             silver_df = conform(kept, logical_date)
-        inserted, updated = merge_preview(silver_df, silver_table, entity.key)
-        merge_latest(silver_df, silver_table, entity.key)
+        inserted, updated = merge_latest(silver_df, silver_table, entity.key)
 
     metrics = {
         "table": silver_table,

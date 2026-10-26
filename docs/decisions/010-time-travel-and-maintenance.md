@@ -37,7 +37,7 @@ The lake had accumulated many small files:
 ## Alternatives considered
 - **Age-based retention** (for example 7 days): the usual production policy, and supported with `--older-than-hours`. But every snapshot here is from the same day, so it would expire nothing and the demo would show no effect.
 - **`remove_orphan_files`:** not needed today, because physical file counts match referenced counts after expiry. Worth scheduling with a multi-day `older_than` if writes ever fail midway.
-- **Fixing the small-file problem at the source:** fewer shuffle partitions, merge-on-read, or pre-filtering MERGE sources to changed rows. All are better long term, but they change D2 code. Recorded as a follow-up; maintenance handles the symptom now.
+- **Fixing the small-file problem at the source:** fewer shuffle partitions, merge-on-read, or pre-filtering MERGE sources to changed rows. All are better long term, but they change D2 code. Recorded as a follow-up; maintenance handles the symptom now. The first two of those, fewer shuffle partitions and MERGE only changed rows, were done afterwards in ADR 011.
 
 ## Consequences
 - Time travel only reaches the snapshots maintenance keeps. The demo exits with a clear message if the requested date's snapshot has expired.

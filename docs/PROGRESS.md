@@ -352,6 +352,32 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
   - Silver DQ: 32/32 passed in **18.9 s**, against 28.5–34.5 s in earlier runs. Gold DQ: 20/20 passed in **20.4 s**, against 24.3–30.7 s. Single samples, not a benchmark.
 - **`lake.ops.maintenance_log`** holds 50 rows (25 tables × 2 runs). The before and after sums are 6,827 and 5,385 physical data files.
 
+## D3-MID follow-up: write efficiency (shuffle partitions, MERGE only changed rows)
+
+**What changed:**
+- `spark.sql.shuffle.partitions=8` (`SPARK_SHUFFLE_PARTITIONS`).
+- `merge_latest` now MERGEs only new or newer rows and skips the MERGE when there are none. It returns `(inserted, updated)` and replaces `merge_preview`.
+- The `dim_customer` MERGE does the same by row hash.
+- `silver.app_events` uses `insert_new` (anti-join plus append).
+- 3 new Spark tests in `tests/spark/test_iceberg_writes.py`. ADR 011.
+
+**Verification result.** Full DAG runs on comparable days, with writes summed from every lake table's snapshot summaries.
+
+| | Old code, 2026-10-06 run | New code, 2026-10-07 run | Old re-run | New re-run |
+|---|---|---|---|---|
+| Data files added | 1,074 | **57** | 329 | **10** |
+| Rows written | 237,428 | 78,467 | 229,307 | 9,125 |
+| Rows rewritten | 224,378 | 65,586 | 222,811 | 2,600 |
+| DAG wall time | 222 s | 170 s | 250 s | 248 s |
+
+- `gold.fact_transactions` went from 68 files / 108,830 rows to 11 files / 18,423 rows per day.
+- `silver.transactions` went from 200 files / 108,830 rows to 8 files / 47,863 rows.
+- Other silver tables went from about 200 files to 5–8.
+- On the new re-run, every silver and gold MERGE table committed **no snapshot**.
+- Both runs succeeded with the DQ gates passing, including the reconciliation.
+- `make test-container`: 39 passed.
+
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -372,10 +398,7 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Driver-side publish:** publish collects the serving tables to the Spark driver. That's fine for about 8.4k rows; larger volumes would need COPY plus a table swap (ADR 009).
 - **PII copy:** `customer_profile` is a second copy of personal data, readable by `engineer` only and rebuilt on every publish.
 - **Access-control scope:** access control covers the serving database only. Lake storage (MinIO, Iceberg) uses platform credentials that analysts don't have.
-- **Small files and full-table rewrites:**
-  - Each MERGE writes up to 200 small files, because of Spark's default shuffle partitions.
-  - Copy-on-write MERGE rewrites the whole table even when nothing changed. For example, the 10-03 gold re-run snapshot shows 104,383 rows added and 104,383 deleted.
-  - Maintenance compacts the result. Fixing it at the source (fewer shuffle partitions, pre-filtering MERGE sources to changed rows, or merge-on-read) is a follow-up (ADR 010).
+- **Daily rewrite of `silver.transactions`:** the small-file and full-rewrite problem was fixed (ADR 011). But `silver.transactions` still rewrites about 47k rows a day, because copy-on-write on an unpartitioned table rewrites every file holding a settled transaction. Merge-on-read or `days(txn_ts)` partitioning would fix it; neither is applied.
 - **Mart history:** gold marts are rebuilt with `createOrReplace`, so expiry keeps only their latest snapshot (7 → 1). Time travel on marts isn't retained; the audit demo uses `fact_transactions`.
 - **Limited time-travel window:** time travel reaches only the last 5 snapshots per table after maintenance.
 - **Shared run id:** manual maintenance runs share `run_id = manual` in `ops.maintenance_log`; `maintained_at` tells them apart.

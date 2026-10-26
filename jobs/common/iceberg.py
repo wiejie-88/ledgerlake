@@ -40,44 +40,60 @@ def overwrite_partition(df: DataFrame, table: str, partition_col: str, value: An
     df.writeTo(qualified(table)).overwrite(F.col(partition_col) == F.lit(value))
 
 
-def merge_latest(df: DataFrame, table: str, key: str, partition_by: list[Column] | None = None) -> None:
+def changed_rows(df: DataFrame, current: DataFrame | None, key: str) -> DataFrame:
+    """Rows of ``df`` that are new or newer than the current version; unchanged and stale rows are dropped.
+
+    ``current`` holds ``key`` and ``updated_at`` of the target table (None if it doesn't exist yet). Adds
+    ``_is_new``: True for keys not in the target, False for updates.
+    """
+    if current is None:
+        return df.withColumn("_is_new", F.lit(True))
+    cur = current.select(F.col(key).alias("_cur_key"), F.col("updated_at").alias("_cur_updated_at"))
+    return (
+        df.join(cur, df[key] == cur["_cur_key"], "left")
+        .where(F.col("_cur_key").isNull() | (F.col("updated_at") > F.col("_cur_updated_at")))
+        .withColumn("_is_new", F.col("_cur_key").isNull())
+        .drop("_cur_key", "_cur_updated_at")
+    )
+
+
+def merge_latest(df: DataFrame, table: str, key: str, partition_by: list[Column] | None = None) -> tuple[int, int]:
     """Upsert ``df`` into ``table`` on ``key``; an existing row is replaced only by a newer ``updated_at``.
 
-    Re-running with the same input changes nothing. ``df`` must hold at most one row per key.
+    Only new and changed rows reach the MERGE, so copy-on-write rewrites just the files holding updated keys,
+    and nothing at all (no snapshot) when nothing changed. ``df`` must hold at most one row per key.
+    Returns (inserted, updated).
     """
-    create_if_missing(df, table, partition_by)
-    df.createOrReplaceTempView("_merge_source")
-    df.sparkSession.sql(
-        f"""
-        MERGE INTO {qualified(table)} t
-        USING _merge_source s
-        ON t.{key} = s.{key}
-        WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-        """
-    )
-
-
-def merge_insert_only(df: DataFrame, table: str, key: str) -> None:
-    """Insert rows of ``df`` whose ``key`` is not yet in ``table`` (for immutable records such as events)."""
-    df.createOrReplaceTempView("_merge_source")
-    df.sparkSession.sql(
-        f"""
-        MERGE INTO {qualified(table)} t
-        USING _merge_source s
-        ON t.{key} = s.{key}
-        WHEN NOT MATCHED THEN INSERT *
-        """
-    )
-
-
-def merge_preview(df: DataFrame, table: str, key: str) -> tuple[int, int]:
-    """Return (rows merge_latest would insert, rows it would update) without writing anything."""
     spark = df.sparkSession
-    if not table_exists(spark, table):
-        return df.count(), 0
-    current = spark.table(qualified(table)).select(key, F.col("updated_at").alias("_current_updated_at"))
-    joined = df.select(key, "updated_at").join(current, key, "left")
-    inserts = joined.where(F.col("_current_updated_at").isNull()).count()
-    updates = joined.where(F.col("updated_at") > F.col("_current_updated_at")).count()
-    return inserts, updates
+    current = spark.table(qualified(table)).select(key, "updated_at") if table_exists(spark, table) else None
+    changes = changed_rows(df, current, key).cache()
+    inserted = changes.where(F.col("_is_new")).count()
+    updated = changes.where(~F.col("_is_new")).count()
+    create_if_missing(df, table, partition_by)
+    if inserted or updated:
+        changes.drop("_is_new").createOrReplaceTempView("_merge_source")
+        spark.sql(
+            f"""
+            MERGE INTO {qualified(table)} t
+            USING _merge_source s
+            ON t.{key} = s.{key}
+            WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET *
+            WHEN NOT MATCHED THEN INSERT *
+            """
+        )
+    changes.unpersist()
+    return inserted, updated
+
+
+def insert_new(df: DataFrame, table: str, key: str) -> int:
+    """Append rows of ``df`` whose ``key`` isn't in ``table`` yet (immutable records such as events).
+
+    A plain append after an anti-join: no existing file is rewritten. Returns the number of rows appended.
+    """
+    existing = df.sparkSession.table(qualified(table)).select(F.col(key).alias("_existing_key"))
+    new = df.join(existing, df[key] == existing["_existing_key"], "left_anti").cache()
+    appended = new.count()
+    if appended:
+        new.writeTo(qualified(table)).append()
+    new.unpersist()
+    return appended

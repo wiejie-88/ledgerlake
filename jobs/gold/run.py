@@ -16,7 +16,7 @@ from datetime import date
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from jobs.common.iceberg import create_if_missing, merge_latest, merge_preview, qualified, table_exists
+from jobs.common.iceberg import create_if_missing, merge_latest, qualified, table_exists
 from jobs.common.pipeline_runs import record_run, run_context
 from jobs.common.spark import CATALOG, get_spark
 from jobs.gold.transforms import (
@@ -38,26 +38,39 @@ def _meta(df: DataFrame, logical_date: date) -> DataFrame:
 
 
 def merge_changed(df: DataFrame, table: str, key: str) -> tuple[int, int]:
-    """SCD type 1 upsert: insert new keys, update rows whose ``_row_hash`` changed. Returns (inserted, updated)."""
+    """SCD type 1 upsert: insert new keys, update rows whose ``_row_hash`` changed. Returns (inserted, updated).
+
+    Only new and changed rows reach the MERGE; when there are none, no snapshot is written.
+    """
     spark = df.sparkSession
     if table_exists(spark, table):
-        current = spark.table(qualified(table)).select(key, F.col("_row_hash").alias("_current_hash"))
-        joined = df.select(key, "_row_hash").join(current, key, "left")
-        inserted = joined.where(F.col("_current_hash").isNull()).count()
-        updated = joined.where(F.col("_current_hash") != F.col("_row_hash")).count()
+        current = spark.table(qualified(table)).select(
+            F.col(key).alias("_cur_key"), F.col("_row_hash").alias("_cur_hash")
+        )
+        changes = (
+            df.join(current, df[key] == current["_cur_key"], "left")
+            .where(F.col("_cur_key").isNull() | (F.col("_cur_hash") != F.col("_row_hash")))
+            .withColumn("_is_new", F.col("_cur_key").isNull())
+            .drop("_cur_key", "_cur_hash")
+        )
     else:
-        inserted, updated = df.count(), 0
+        changes = df.withColumn("_is_new", F.lit(True))
+    changes = changes.cache()
+    inserted = changes.where(F.col("_is_new")).count()
+    updated = changes.where(~F.col("_is_new")).count()
     create_if_missing(df, table)
-    df.createOrReplaceTempView("_dim_source")
-    spark.sql(
-        f"""
-        MERGE INTO {qualified(table)} t
-        USING _dim_source s
-        ON t.{key} = s.{key}
-        WHEN MATCHED AND t._row_hash <> s._row_hash THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT *
-        """
-    )
+    if inserted or updated:
+        changes.drop("_is_new").createOrReplaceTempView("_dim_source")
+        spark.sql(
+            f"""
+            MERGE INTO {qualified(table)} t
+            USING _dim_source s
+            ON t.{key} = s.{key}
+            WHEN MATCHED AND t._row_hash <> s._row_hash THEN UPDATE SET *
+            WHEN NOT MATCHED THEN INSERT *
+            """
+        )
+    changes.unpersist()
     return inserted, updated
 
 
@@ -97,8 +110,7 @@ def build_gold(spark: SparkSession, logical_date: date) -> tuple[int, int]:
     started = time.monotonic()
     fact = _meta(build_fact_transactions(silver["transactions"], silver["accounts"]), logical_date).cache()
     rows_in = fact.count()
-    inserted, updated = merge_preview(fact, "gold.fact_transactions", "txn_id")
-    merge_latest(fact, "gold.fact_transactions", "txn_id", partition_by=[F.days("txn_ts")])
+    inserted, updated = merge_latest(fact, "gold.fact_transactions", "txn_id", partition_by=[F.days("txn_ts")])
     fact.unpersist()
     written += inserted + updated
     rows = spark.table(qualified("gold.fact_transactions")).count()

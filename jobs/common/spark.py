@@ -42,6 +42,8 @@ def build_spark_conf(env: Mapping[str, str]) -> dict[str, str]:
         # DriverManager can find the Postgres driver. Local mode: one JVM.
         "spark.driver.extraClassPath": f"{env.get('SPARK_JARS_DIR', '/opt/spark-jars')}/*",
         "spark.driver.memory": env.get("SPARK_DRIVER_MEMORY", "2g"),
+        # Spark's default of 200 shuffle partitions wrote up to 200 tiny files per MERGE; 8 suits a laptop.
+        "spark.sql.shuffle.partitions": env.get("SPARK_SHUFFLE_PARTITIONS", "8"),
         "spark.sql.session.timeZone": "UTC",
         "spark.ui.showConsoleProgress": "false",
         "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
