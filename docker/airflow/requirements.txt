@@ -3,3 +3,5 @@
 pyspark==3.5.9
 pymongo==4.18.1
 psycopg2-binary==2.9.13
+# Runs the Spark unit tests inside the container (make test-spark)
+pytest==9.1.1

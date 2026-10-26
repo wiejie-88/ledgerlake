@@ -5,6 +5,7 @@
 | D1-AM | Done | 2026-10-26 |
 | D1-PM | Done | 2026-10-26 |
 | D1-EVE | Done | 2026-10-26 |
+| D2-AM | Done | 2026-10-26 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -112,6 +113,56 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Bronze schema:** `bronze.transactions` keeps `txn_ts` and `updated_at` as `timestamp_ntz` and `amount` as `decimal(12,2)`, and is partitioned by `_logical_date`.
 - **Local checks:** `pytest` gives 20 passed in 50.9 s (Python 3.11.5), and `ruff check` and `ruff format --check` are clean.
 
+## D2-AM: silver (dedupe, typing, PII hashing, quarantine, schema evolution)
+
+**What was built:**
+- `jobs/silver/rules.py`: the data contract. It defines accepted values, plus NULL-safe validation rules that each map a failure reason to a condition.
+- `jobs/silver/transforms.py`: pure DataFrame functions:
+  - validation flags, parent-key checks, deduplication, and late-update detection;
+  - conversion from Malaysia time to UTC, salted SHA-256 hashing, and age bands;
+  - conform functions per entity, and property-key detection for schema evolution.
+- `jobs/silver/run.py` (`make silver date=D`): per entity, it validates, deduplicates, audits late updates, overwrites quarantine partition D, then MERGEs into silver. Event loading handles schema evolution.
+- `jobs/common/iceberg.py`: shared helpers for partition overwrite, `merge_latest` and `merge_insert_only`. Bronze now uses them too.
+- `jobs/silver/report.py` (`make silver-report`): prints quarantine reasons, silver counts, PII column layout and schema-evolution evidence, and exits 1 if an injected defect type is missing.
+- `jobs/common/reset_lake.py` (`make reset-lake`) drops all lake tables.
+- `make test-spark` runs the Spark unit tests inside the container. `pytest==9.1.1` was added to the image, and `tests/` is mounted into the container.
+- The Airflow service gets `PII_SALT`.
+- ADR 005.
+
+**Decision:** late-arriving updates are applied in silver, and the version they replace is written to quarantine as `superseded_by_late_update`, as an audit trail. This was chosen by the project owner.
+
+**Verification result.** Run from a clean lake: `reset_lake`, then `seed`, then for each of 2026-09-29, 09-30 and 10-01, `bronze` then `silver`, with a `tick` before each later date.
+- **`make test-spark`:** 9 passed in 22.0 s.
+- **Silver runs:** 78 s for 09-29 (the initial load), 85 s for 09-30 and 72 s for 10-01.
+
+  | Logical date | silver.transactions | quarantine.transactions reasons |
+  |---|---|---|
+  | 09-29 | rows_in 99,897, valid 97,734, inserted 97,734 | duplicate_row 584, negative_amount 416, null_amount 397, unknown_category 395, orphan_account 371 |
+  | 09-30 | rows_in 1,691, valid 1,658, inserted 1,559, updated 99 | superseded_by_late_update 99, duplicate_row 17, unknown_category 7, negative_amount 4, orphan_account 3, null_amount 2 |
+  | 10-01 | rows_in 1,707, valid 1,671, inserted 1,567, updated 104 | superseded_by_late_update 104, duplicate_row 8, negative_amount 8, orphan_account 7, unknown_category 7, null_amount 6 |
+
+- **App events:** 253, 6 and 4 duplicate rows were quarantined on the three dates.
+- **Other tables:** customers, accounts and cash_advances had no quarantined rows. Updates were applied, for example customers 5 inserted and 6 updated on 09-30.
+- **Re-run of silver for 10-01:** every table reported `inserted=0 updated=0` with unchanged table rows and quarantine counts.
+- **`make silver-report`:** `CHECK PASSED: every injected defect type is in quarantine with a reason`.
+- **Reconciliation with the source** (after the ticks). Distinct quarantined keys equal the source's measured defect counts:
+
+  | Defect | Count |
+  |---|---|
+  | duplicate_row | 608 |
+  | null_amount | 405 |
+  | negative_amount | 427 |
+  | unknown_category | 406 |
+  | orphan_account | 381 |
+
+  `silver.transactions` holds 0 null, negative, unknown-category or orphan rows.
+- **Silver row counts:** customers 2,010, accounts 3,008, transactions 100,860, cash_advances 614, app_events 51,359. Each is one row per key.
+- **PII:** `silver.customers` columns are `customer_id, email_hash, phone_hash, age_band, state, income_band, created_at, updated_at, _logical_date, _processed_at`. Name, email, phone and date of birth exist only in `silver.customers_pii`.
+- **Schema evolution:** the run logged `added column referral_source (first seen at event_ts=2026-09-13 16:16:17)`, which is 2026-09-14 Malaysia time.
+  - The first data append (36,174 records in 45 files) has the schema without `referral_source`.
+  - All 45 of those files are still in the current table (66 files in total), so none were rewritten.
+  - Rows without `referral_source`: 36,174, event dates 2026-08-01 to 09-13. Rows with it: 15,185, from 2026-09-14 to 10-01.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -123,6 +174,9 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Extraction limits** (ADR 004):
   - A re-run of an old date after newer source changes can return fewer rows, because those rows land in the newer partition instead.
   - Backfilling a date earlier than already-loaded partitions can duplicate rows across partitions. Silver deduplicates them.
-- **No Spark unit tests:** the Spark functions in `jobs/bronze/load.py` were checked only by these end-to-end runs. Spark-based unit tests come with CI in D3-PM.
+- **Spark tests run only in the container:** the silver transforms have Spark unit tests, but they run only in the container (`make test-spark`). The bronze Spark functions are covered only by end-to-end runs. Running Spark tests in CI comes in D3-PM.
+- **Late-update auditing starts on day two:** `superseded_by_late_update` is detected only from the second loaded day onward, because the initial full load contains only the latest versions (ADR 005).
+- **Silver run time:** silver takes 70–85 s per day. Most of it is Spark start-up and one MERGE per table. Acceptable at this scale.
+- **Empty snapshots:** a no-op MERGE (a re-run) still commits an empty Iceberg snapshot.
 - **Slow tests:** the generator tests take about 50 s because they run the in-memory seed three times.
 - **No `ops.pipeline_runs` yet:** that table and the run metrics written to it come with the Airflow DAG in D2-EVE.

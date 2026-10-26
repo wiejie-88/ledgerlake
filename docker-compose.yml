@@ -93,6 +93,8 @@ services:
       # Sources (read by generator/ and the extract jobs)
       SOURCE_PG_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/source
       MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
+      # Salt for hashing email and phone in silver
+      PII_SALT: ${PII_SALT}
       # Iceberg catalog and object storage (read by jobs/common/spark.py)
       LAKE_CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg_catalog
       LAKE_CATALOG_USER: ${POSTGRES_USER}
@@ -109,6 +111,8 @@ services:
       - ./generator:/opt/ledgerlake/generator
       - ./jobs:/opt/ledgerlake/jobs
       - ./dags:/opt/ledgerlake/dags
+      - ./tests:/opt/ledgerlake/tests
+      - ./pyproject.toml:/opt/ledgerlake/pyproject.toml:ro
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/api/v2/monitor/health"]
       interval: 15s

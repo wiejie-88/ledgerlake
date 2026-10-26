@@ -2,7 +2,7 @@
 
 A batch lakehouse for a fictional Malaysian consumer fintech app. Postgres and MongoDB are extracted into Apache Iceberg tables on MinIO, transformed with PySpark (bronze → silver → gold), orchestrated by Airflow, and published to a Postgres serving schema with role-based access. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
-> **Status:** Day 1 is done and verified on Apple Silicon: the platform, the synthetic data generator, and extract-to-bronze with watermarks. See [docs/PROGRESS.md](docs/PROGRESS.md). Silver, gold, DQ, the Airflow DAG and serving come in later blocks.
+> **Status:** Day 1 and silver (D2-AM) are done and verified on Apple Silicon. See [docs/PROGRESS.md](docs/PROGRESS.md). DQ, gold, the Airflow DAG and serving come in later blocks.
 
 ## Prerequisites
 - Docker Desktop (Apple Silicon and x86 both work). In Docker Desktop, go to **Settings → Resources** and set **Memory to about 8 GB**.
@@ -18,6 +18,9 @@ make seed    # 60 days of synthetic source data in Postgres and MongoDB
 make bronze date=2026-09-29   # first run: full initial load into Iceberg bronze
 make tick date=2026-09-30     # one more day of source data
 make bronze date=2026-09-30   # incremental load (only rows changed since the previous high-water mark)
+make silver date=2026-09-29   # silver + quarantine for each loaded date, in date order
+make silver date=2026-09-30
+make silver-report            # quarantine reasons, PII layout, schema evolution evidence
 ```
 
 The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow image. It took about 8 minutes on the reference MacBook Air.
@@ -41,6 +44,10 @@ The first `make up` downloads about 1.5 GB of images and builds a 4.4 GB Airflow
 | `make seed` | Rebuilds the synthetic source history (2026-08-01 to 2026-09-29), wiping existing source data. Logs row counts and defect counts. |
 | `make tick date=2026-09-30` | Adds one day of data and updates some existing rows. A day that was already generated is skipped. |
 | `make bronze date=2026-09-29` | Extracts all five sources incrementally into `lake.bronze.*` and replaces that date's partition. Re-running the same date gives the same counts. |
+| `make silver date=2026-09-29` | Validates and deduplicates bronze partition D, writes rejected rows to `quarantine.*` with a `failure_reason`, and MERGEs the rest into `silver.*`. Re-runs change nothing. |
+| `make silver-report` | Prints quarantine counts by reason, silver row counts, the PII column layout and schema-evolution evidence. Fails if an injected defect type is missing. |
+| `make reset-lake` | Drops every lake table, after asking. Use it before re-seeding for a fresh run. |
+| `make test-spark` | Runs the Spark unit tests inside the Airflow container |
 | `make test` / `make lint` | Unit tests and ruff, run locally (`pip install -r requirements-dev.txt` first) |
 
 ## Synthetic data
@@ -74,6 +81,19 @@ For logical date D (a Malaysia business day), each source is extracted with `low
 - `lake.ops.watermarks` records each entity's high-water mark after every run.
 
 Bronze keeps raw source types and adds `_ingested_at`, `_source`, `_batch_id` and `_logical_date`. The details and trade-offs are in [ADR 004](docs/decisions/004-incremental-extract-watermarks.md).
+
+## Silver and quarantine
+For each logical date, silver reads that bronze partition and runs these steps for each entity:
+- **Validate:** accepted values for status, category, direction and types; non-null keys; `amount > 0`; and parents that exist (transaction → account → customer).
+- **Deduplicate:** keep the newest version per business key.
+- **Quarantine:** write rejected rows to `quarantine.<entity>` with a `failure_reason`, for example `duplicate_row`, `null_amount`, `negative_amount`, `unknown_category` or `orphan_account`. When a transaction's late-arriving update replaces an older version, that older version is kept there as `superseded_by_late_update`.
+- **Conform and merge:** convert timestamps to UTC and MERGE into `silver.*`.
+
+Personal data is protected:
+- `silver.customers` has only `email_hash` and `phone_hash` (salted SHA-256, with the salt from `PII_SALT` in `.env`) and an `age_band`.
+- Name, email, phone and date of birth live only in `silver.customers_pii`.
+
+`silver.app_events` gains `referral_source` through Iceberg schema evolution (`ALTER TABLE ADD COLUMN`) when the field first appears on 2026-09-14. Data files written earlier aren't rewritten. Details are in [ADR 005](docs/decisions/005-silver-quarantine-and-pii.md).
 
 ## Notes
 - Postgres and MongoDB init scripts run only on an empty volume. Run `make clean` to re-initialise them.

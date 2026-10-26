@@ -9,6 +9,7 @@ from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import MapType, StringType, StructField, StructType, TimestampType
 
+from jobs.common.iceberg import overwrite_partition
 from jobs.common.spark import CATALOG
 from jobs.common.time_windows import parse_ts
 
@@ -81,12 +82,7 @@ def previous_high_watermark(
 
 def write_partition(df: DataFrame, table: str, logical_date: date) -> None:
     """Replace the ``logical_date`` partition of ``table`` with ``df`` (creating the table on first use)."""
-    full_name = f"{CATALOG}.{table}"
-    if not df.sparkSession.catalog.tableExists(full_name):
-        df.writeTo(full_name).partitionedBy(F.col("_logical_date")).tableProperty("format-version", "2").create()
-    else:
-        # overwrite(condition) also clears the partition when df is empty; overwritePartitions() would not.
-        df.writeTo(full_name).overwrite(_partition(logical_date))
+    overwrite_partition(df, table, "_logical_date", logical_date)
 
 
 def partition_counts(spark: SparkSession, table: str, logical_date: date) -> tuple[int, int]:

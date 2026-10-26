@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report reset-lake test-spark test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -44,6 +44,20 @@ tick: ## Add one day of source data: make tick date=YYYY-MM-DD
 bronze: ## Extract sources into Iceberg bronze for one logical date: make bronze date=YYYY-MM-DD
 	@test -n "$(date)" || (echo "usage: make bronze date=YYYY-MM-DD" && exit 2)
 	$(COMPOSE) exec airflow python -m jobs.bronze.run --date $(date)
+
+silver: ## Build silver and quarantine from one bronze partition: make silver date=YYYY-MM-DD
+	@test -n "$(date)" || (echo "usage: make silver date=YYYY-MM-DD" && exit 2)
+	$(COMPOSE) exec airflow python -m jobs.silver.run --date $(date)
+
+silver-report: ## Quarantine reasons, silver counts, PII columns and schema evolution evidence
+	$(COMPOSE) exec airflow python -m jobs.silver.report
+
+reset-lake: ## DROP all bronze/silver/quarantine/gold/ops tables (asks first)
+	@read -p "This drops every lake table and deletes its files. Type 'yes' to continue: " ans && [ "$$ans" = yes ]
+	$(COMPOSE) exec airflow python -m jobs.common.reset_lake
+
+test-spark: ## Run the Spark unit tests inside the Airflow container
+	$(COMPOSE) exec airflow python -m pytest -q tests/spark
 
 test: ## Run unit tests locally (needs: pip install -r requirements-dev.txt)
 	python -m pytest -q

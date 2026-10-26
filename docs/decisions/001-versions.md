@@ -22,7 +22,7 @@ CLAUDE.md requires every version to be pinned. The platform must run natively on
 | Python constraints | `constraints-3.3.2/constraints-3.11.txt` (official Airflow) | n/a |
 | pymongo (image) | `pymongo==4.18.1` (same as Airflow constraints) | wheel available |
 | psycopg2-binary (image) | `psycopg2-binary==2.9.13` (same as Airflow constraints) | wheel available |
-| pytest (dev) | `pytest==9.1.1` | n/a |
+| pytest (dev; also in the image for `make test-spark`) | `pytest==9.1.1` | n/a |
 | ruff (dev) | `ruff==0.17.0` | wheel available |
 
 Faker (listed in SPEC §4) is not used. See ADR 003.
