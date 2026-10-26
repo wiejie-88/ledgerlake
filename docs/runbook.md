@@ -13,7 +13,7 @@ All commands run from the repository root. Pipeline jobs run inside the `airflow
 | Delete everything | `make clean` | Asks first. Deletes the Postgres, MongoDB and MinIO volumes. |
 | Drop lake tables only | `make reset-lake` | Asks first. Source data and serving are untouched. |
 
-Airflow UI: http://localhost:8080 (no login; bound to localhost only). MinIO console: http://localhost:9001.
+Airflow UI: http://localhost:8080 (no login; bound to localhost only). MinIO console: http://localhost:9001. Dashboard: http://localhost:8501. It reads as `analyst`, so it shows data only after the first publish; until then it says what to run.
 
 ## Daily operation
 - **One business date, full pipeline:** `make run date=YYYY-MM-DD` runs `ledgerlake_daily` through `airflow dags test` with an explicit `business_date`.
@@ -30,7 +30,8 @@ Every task is idempotent for its business date, so re-running a date is safe:
 | Situation | Action |
 |---|---|
 | A task failed for a transient reason | It retries twice automatically (DQ tasks don't retry). Then clear the task in the UI, or run `make run date=D` again. |
-| Backfill several days | Verified: `make run date=D` for each date, in order. Airflow's own `docker compose exec airflow airflow backfill create --dag-id ledgerlake_daily --from-date … --to-date …` should work, since every task is idempotent per date, but **it hasn't been exercised in this project's verification**. |
+| Backfill several days | `make backfill from=2026-10-08 to=2026-10-14` runs the DAG once per business date, in order, and stops at the first failure (ADR 016). |
+| Backfill through the scheduler (DAG unpaused) | `docker compose exec airflow airflow backfill create --dag-id ledgerlake_daily --from-date 2026-10-08T00:00:00+08:00 --to-date 2026-10-14T00:00:00+08:00`. Pass Malaysia-time boundaries: plain dates are read as UTC and skip the first business day. **Runs of a paused DAG stay `queued`**, and unpausing also starts the daily schedule. Cancel a stuck backfill with `curl -X PUT http://localhost:8080/api/v2/backfills/<id>/cancel`. |
 | Rebuild one layer by hand | `make bronze date=D`, `make silver date=D`, `make gold date=D`, `make publish date=D` (in that order) |
 
 Backfilling a date *earlier* than already-loaded partitions can put a row into two bronze partitions. Silver keeps only the newest version (ADR 004). Gold is rebuilt from current silver, not as of the backfilled date (ADR 007).

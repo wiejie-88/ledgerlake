@@ -19,3 +19,4 @@ Each ADR records the context, the decision, the alternatives considered, and the
 | [013](013-minio-and-aws-migration-path.md) | MinIO, and the migration path to S3 and Glue | Key decision 1, could-have 10 |
 | [014](014-iceberg-jdbc-catalog.md) | Iceberg JDBC catalog in Postgres | Key decision 2 |
 | [015](015-spark-local-mode-in-airflow.md) | Spark in local mode inside the Airflow container | Key decision 3 |
+| [016](016-backfill-and-dashboard.md) | Backfills as sequential DAG tests; Streamlit dashboard reading as `analyst` | Could-haves 9, 11 |

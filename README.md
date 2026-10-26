@@ -39,7 +39,8 @@ Features are mapped to the skills listed in SPEC §1.
 | SQL and NoSQL sources | Incremental extracts from Postgres (`updated_at`) and MongoDB (`event_ts`) with idempotent watermarks ([ADR 004](docs/decisions/004-incremental-extract-watermarks.md)) |
 | Data quality | Quarantine with failure reasons; 39 silver checks (including a per-run count of every injected defect type) and 20 gold checks; `error` vs `warn` severity; mart-to-silver reconciliation; results in `ops.dq_results` |
 | Data governance and access control | PII hashed in silver and isolated in `customers_pii`; `analyst` / `engineer` roles; masked view; 30-test access proof ([docs/access_control.md](docs/access_control.md)) |
-| Documentation | [Architecture](docs/architecture.md), [data dictionary](docs/data_dictionary.md), [runbook](docs/runbook.md), [15 ADRs](docs/decisions/README.md) |
+| Analytics | Streamlit dashboard of the marts at http://localhost:8501, reading as the least-privileged `analyst` role ([ADR 016](docs/decisions/016-backfill-and-dashboard.md)) |
+| Documentation | [Architecture](docs/architecture.md), [data dictionary](docs/data_dictionary.md), [runbook](docs/runbook.md), [16 ADRs](docs/decisions/README.md) |
 | Reproducibility | Pinned images, JARs (SHA-256) and packages; deterministic generator (same fingerprint on every seed); CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) |
 
 ## Prerequisites
@@ -65,6 +66,8 @@ make maintenance              # compact files, expire old snapshots; logs file c
 - **Airflow UI:** http://localhost:8080 (no login; bound to localhost only).
 - **MinIO console:** http://localhost:9001.
 - **Serving database:** `psql -h localhost -U analyst serving`.
+- **Dashboard:** http://localhost:8501, a one-page view of the marts. It reads the serving database as `analyst`, so it only sees masked customer data.
+- **More days:** `make backfill from=2026-10-01 to=2026-10-07` runs the pipeline for each date in order.
 
 To stop, run `make down`, which keeps the data. `make clean` deletes all data volumes and asks first. Day-to-day operations, re-runs, backfills and troubleshooting are in the [runbook](docs/runbook.md).
 
@@ -109,6 +112,7 @@ Every figure below was measured, not estimated. The quick start figures come fro
 | `make smoke` | Iceberg smoke test through the JDBC catalog on MinIO |
 | `make seed` / `make tick date=D` | Rebuild the 60-day source history / add one day (skipped if already generated) |
 | `make run date=D` | Run the whole `ledgerlake_daily` DAG for business date D (idempotent) |
+| `make backfill from=D1 to=D2` | Run the DAG for every business date in the range, in order; stops at the first failure |
 | `make bronze date=D`, `make silver date=D`, `make gold date=D`, `make publish date=D` | Run one layer by hand (in that order) |
 | `make dq layer=silver\|gold date=D` | Run a DQ suite; exits 1 on an `error` failure; results in `lake.ops.dq_results` |
 | `make dq-gate-demo date=D` | The DAG with a simulated defect (in memory only): `dq_silver` fails, downstream `upstream_failed` |

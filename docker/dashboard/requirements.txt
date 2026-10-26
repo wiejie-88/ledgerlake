@@ -1,0 +1,5 @@
+# One-page Streamlit dashboard (SPEC could-have 9). Top-level pins; the image build runs `pip check`.
+streamlit==1.65.0
+altair==6.3.0
+pandas==3.0.6
+psycopg2-binary==2.9.13

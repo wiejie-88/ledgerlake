@@ -13,6 +13,7 @@
 | D3-MID | Done | 2026-10-26 |
 | D3-PM | Done locally; **GitHub run pending** (no remote yet) | 2026-10-26 |
 | D3-EVE | Done | 2026-10-26 |
+| Could-haves 9, 11 | Done (10 is ADR 013) | 2026-10-27 |
 
 All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engine 29.9.2 on arm64, Compose v5.6.1, 8 CPUs and 8.3 GB of memory for Docker. Every number below is measured.
 
@@ -460,6 +461,49 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Independent cross-check:** a direct count from `lake.quarantine.*` by `_quarantine_date` and exploded reason equals the `failed_rows` recorded in `ops.dq_results` for **all 14 checks** on both dates.
 - **Tests:** `make test-container` gives 45 passed.
 
+## Could-haves 9 and 11: Streamlit dashboard, 7-day backfill demo
+
+**What was built:**
+- `dashboard/app.py` plus `docker/dashboard/`: a `dashboard` Compose service (Streamlit 1.65.0, Altair 6.3.0, pandas 3.0.6, psycopg2-binary 2.9.13; `pip check` at build; 851 MB image), on `127.0.0.1:8501`.
+  - It reads the serving database **as `analyst`**.
+  - The page has:
+    - KPIs as plain numbers: completed spend, transactions, average per day, and the repayment rate of the oldest due cohort;
+    - charts: completed spend per day (line), spend by category (bars), and the repayment rate among due advances per cohort;
+    - tables: the cohort table, customer features by month, and 10 rows of the masked customer view.
+  - It's read-only, with the developer toolbar hidden and usage statistics off.
+- `make backfill from=D1 to=D2`: one `airflow dags test` per business date, in order, stopping at the first failure.
+- `DASHBOARD_PORT` in `.env.example`. Runbook, README and ADR 016 updated.
+
+**Findings while building the backfill** (ADR 016):
+- `airflow backfill create --from-date 2026-10-08 --to-date 2026-10-14` (dry run) reads plain dates as UTC. It produced business dates **10-09 to 10-14, 6 runs, skipping 10-08**. Malaysia-time boundaries (`T00:00:00+08:00`) give exactly 10-08 to 10-14.
+- The real native backfill created 7 runs that stayed **`queued`**, because the scheduler only queues tasks for unpaused DAGs (`scheduler_job_runner.py`: `.where(~DM.is_paused)`). Unpausing would also start the daily schedule and process the current day out of order.
+  - The backfill was cancelled through `PUT /api/v2/backfills/1/cancel`. Its 7 runs were marked `failed` without any task running, so no data changed.
+  - `make backfill` was then implemented as sequential `dags test` runs.
+
+**Verification result:**
+- **`make backfill from=2026-10-08 to=2026-10-14`:** exit 0 in **1,657 s** wall.
+
+  | Business date | State | Wall time |
+  |---|---|---|
+  | 2026-10-08 | success | 290 s (dashboard image building at the same time) |
+  | 2026-10-09 | success | 194 s |
+  | 2026-10-10 | success | 177 s |
+  | 2026-10-11 | success | 181 s |
+  | 2026-10-12 | success | 207 s |
+  | 2026-10-13 | success | 360 s |
+  | 2026-10-14 | success | 247 s |
+
+  - `ops.pipeline_runs` shows 7/7 successful tasks for every date.
+  - `ops.dq_results` shows **59 checks per date, all passed** (39 silver plus 20 gold). That confirms in a live DAG that silver results are no longer deleted by `dq_gold`.
+  - Bronze has partitions for every date from 10-08 to 10-14, and `gold.fact_transactions` reaches `txn_date` 2026-10-14.
+- **Dashboard,** checked in the built-in browser at 1400×1000:
+  - Every section rendered. KPIs for the default 30 days were completed spend MYR 3,334,805, 41,284 transactions, MYR 111,160 per day, and 82.5% repayment for the oldest due cohort.
+  - The line-chart tooltip showed date, spend and transactions.
+  - The masked table showed initials only (`S***`, `L***`, …).
+  - Two fixes after the first look: the truncated `food_and_beverage` axis label (`labelLimit`), and the developer toolbar (`toolbarMode = "viewer"`). Customer-feature averages are now rounded.
+  - The health endpoint returns HTTP 200.
+- **Tests:** `make test-container` 45 passed, `make access-test` 30 passed, local `pytest` 26 passed and 30 skipped, ruff and all pre-commit hooks clean.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -486,7 +530,9 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Shared run id:** manual maintenance runs share `run_id = manual` in `ops.maintenance_log`; `maintained_at` tells them apart.
 - **Maintenance isn't scheduled:** it's a manual `make` command, not part of `ledgerlake_daily`.
 - **Lost silver DQ results in earlier DAG runs:** DAG runs before the D3-EVE fix (D2-EVE through D3-MID) lost their `dq_silver` rows in `ops.dq_results`. The gate itself worked: `dq_silver` passed or failed before `dq_gold` ran.
-- **Backfill command untested:** `airflow backfill create` is documented in the runbook but wasn't exercised. Backfills were verified as sequential `make run date=…`.
+- **Native backfill needs an unpaused DAG:** `make backfill` (sequential DAG tests) is verified over 7 dates. Airflow's native `backfill create` was tested and needs an unpaused DAG (ADR 016). The cancelled attempt left 7 `failed` backfill runs in the Airflow history.
+- **Stale demo DAG entry:** Airflow's metadata database still lists `ledgerlake_dq_gate_demo`, whose file was deleted in D2-EVE. It's paused and has no file, so it's harmless; `airflow dags delete ledgerlake_dq_gate_demo` would remove it.
+- **No dashboard tests:** the dashboard has no unit tests (presentation only; the queries are plain SQL over the serving tables). It was checked in the browser.
 - **No GitHub CI run yet:** CI hasn't run on GitHub Actions (no remote); it passed in a local clean-container stand-in.
 - **Acceptance gap (SPEC §9, third criterion): closed** by the per-defect-type checks below.
 - **Run time:** a full DAG run takes about 3.5 minutes, because each task starts its own Spark driver.

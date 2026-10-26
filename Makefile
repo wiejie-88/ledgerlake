@@ -2,7 +2,7 @@ COMPOSE := docker compose
 MC_ALIAS := mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq publish access-test demo demo-time-travel demo-schema-evolution maintenance run dq-gate-demo reset-lake test-container test lint
+.PHONY: help up down clean ps logs smoke seed tick bronze silver silver-report gold dq publish access-test demo demo-time-travel demo-schema-evolution maintenance run backfill dq-gate-demo reset-lake test-container test lint
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -81,6 +81,18 @@ maintenance: ## Compact files, rewrite manifests, expire snapshots (keep last 5)
 run: ## Run the full ledgerlake_daily DAG for one business date: make run date=YYYY-MM-DD
 	@test -n "$(date)" || (echo "usage: make run date=YYYY-MM-DD" && exit 2)
 	$(COMPOSE) exec airflow airflow dags test ledgerlake_daily -c '{"business_date": "$(date)"}'
+
+backfill: ## Run ledgerlake_daily for each business date in a range, in order: make backfill from=YYYY-MM-DD to=YYYY-MM-DD
+	@test -n "$(from)" -a -n "$(to)" || (echo "usage: make backfill from=YYYY-MM-DD to=YYYY-MM-DD" && exit 2)
+	@# One `airflow dags test` per date (no scheduler, DAG stays paused); stops at the first failed date.
+	@for d in $$($(COMPOSE) exec -T airflow python -c "import datetime as t; a, b = (t.date.fromisoformat(x) \
+		for x in ('$(from)', '$(to)')); print(*[a + t.timedelta(n) for n in range((b - a).days + 1)])"); do \
+		start=$$(date +%s); \
+		state=$$($(COMPOSE) exec -T airflow airflow dags test ledgerlake_daily -c "{\"business_date\": \"$$d\"}" 2>&1 \
+			| grep -oE "DagRun Finished: .* state=[a-z]+" | grep -oE "state=[a-z]+$$" | cut -d= -f2); \
+		echo "business_date=$$d state=$${state:-unknown} duration_s=$$(( $$(date +%s) - start ))"; \
+		[ "$$state" = success ] || exit 1; \
+	done
 
 dq-gate-demo: ## Run ledgerlake_daily with a simulated DQ defect: dq_silver fails, downstream upstream_failed
 	@test -n "$(date)" || (echo "usage: make dq-gate-demo date=YYYY-MM-DD" && exit 2)

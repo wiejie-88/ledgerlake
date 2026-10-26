@@ -1,0 +1,16 @@
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+
+[browser]
+# Don't send usage statistics to Streamlit.
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+
+[client]
+# Read-only dashboard: hide the developer toolbar (Deploy, rerun, settings).
+toolbarMode = "viewer"

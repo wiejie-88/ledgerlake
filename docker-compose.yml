@@ -125,6 +125,27 @@ services:
       retries: 20
       start_period: 120s
 
+  # One-page Streamlit view of the marts, reading the serving database as the analyst role (no PII reachable).
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+    image: ledgerlake-dashboard:1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVING_ANALYST_DSN: postgresql://analyst:${ANALYST_PASSWORD:-}@postgres:5432/serving
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - ./dashboard:/app:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 volumes:
   pg_data:
   mongo_data:
