@@ -7,7 +7,7 @@ A batch lakehouse for a fictional Malaysian consumer fintech app, built to run o
 - orchestrated by **Airflow**;
 - published to a **Postgres serving database** where an `analyst` role can't see personal data.
 
-Everything is pinned, synthetic and reproducible. The specification is [docs/SPEC.md](docs/SPEC.md), and the block-by-block build log with every measurement is [docs/PROGRESS.md](docs/PROGRESS.md).
+Everything is pinned, synthetic and reproducible. The specification is [docs/SPEC.md](docs/SPEC.md).
 
 ## Architecture
 
@@ -74,7 +74,7 @@ make maintenance              # compact files, expire old snapshots; logs file c
 To stop, run `make down`, which keeps the data. `make clean` deletes all data volumes and asks first. Day-to-day operations, re-runs, backfills and troubleshooting are in the [runbook](docs/runbook.md).
 
 ## Measured results
-Every figure below was measured, not estimated. The quick start figures come from a **fresh copy of this repository (no `.env`) following only the steps above**, on a MacBook Air (Apple Silicon, Docker Desktop with 8 GB, 8 CPUs), on 2026-10-26. The full log of every block is in [docs/PROGRESS.md](docs/PROGRESS.md).
+Every figure below was measured, not estimated. The quick start figures come from a **fresh copy of this repository (no `.env`) following only the steps above**, on a MacBook Air (Apple Silicon, Docker Desktop with 8 GB, 8 CPUs), on 2026-10-26.
 
 **Quick start timings**
 
@@ -157,7 +157,7 @@ quality/         DQ checks, suites, severity gate, mart reconciliation
 serving/         serving SQL: tables, masked view, roles and grants
 docker/          Airflow image, Postgres and MongoDB init scripts
 tests/           unit/, spark/, dags/, integration/
-docs/            SPEC, PROGRESS, architecture, data dictionary, runbook, access control, decisions/
+docs/            SPEC, architecture, data dictionary, runbook, access control, decisions/
 ```
 
 ## Tests and CI

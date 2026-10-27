@@ -40,4 +40,4 @@ Both roles are `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`. PUBLIC has no pr
 - **Writes and escalation:** writes, CREATE and `SET ROLE` fail. Connecting to the other databases fails for both roles.
 - **Engineer:** can read every personal-data column, and is read-only.
 
-The latest result is recorded in [PROGRESS.md](PROGRESS.md) under D3-AM.
+The latest result (30 passed) is in the README's measured results.

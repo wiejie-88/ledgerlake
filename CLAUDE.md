@@ -1,16 +1,15 @@
 # LedgerLake — Working Rules for Claude Code
 
 ## Project
-LedgerLake is a 3-day portfolio data engineering project. The full specification is in `docs/SPEC.md`. Read it before planning any block. Progress is tracked in `docs/PROGRESS.md`.
+LedgerLake is a 3-day portfolio data engineering project. The full specification is in `docs/SPEC.md`. Read it before planning any block.
 
 ## Workflow
 - Work is split into blocks (D1-AM, D1-PM, … D3-EVE), listed in SPEC.md Section 8.
 - Plan and implement ONE block at a time. Never start the next block without my approval.
 - At the end of every block:
   1. Run the block's "Done when" verification and show me the actual output.
-  2. Update `docs/PROGRESS.md`: block ID, status, what was built, verification result, known issues.
-  3. Update the README if setup or usage changed.
-  4. Suggest a git commit message. Do not commit unless I ask.
+  2. Update the README if setup or usage changed.
+  3. Suggest a git commit message. Do not commit unless I ask.
 
 ## Engineering rules
 - Choose the simplest working option. No tools or services beyond SPEC.md without asking me first.
@@ -24,7 +23,7 @@ LedgerLake is a 3-day portfolio data engineering project. The full specification
 
 ## Honesty in documentation
 - Report only measured numbers (row counts, run times, defects caught). Never estimate or invent metrics.
-- If a feature is partial or skipped, say so in PROGRESS.md and the README.
+- If a feature is partial or skipped, say so in the README.
 
 ## Style
 - Python 3.11, type hints, docstrings on public functions, ruff-clean.

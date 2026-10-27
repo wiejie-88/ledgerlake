@@ -19,6 +19,6 @@ Trying Airflow's native `airflow backfill create` on `ledgerlake_daily` showed t
   - Charts follow the dataviz rules: single-series charts (no legend, one color), thin marks, hover tooltips, a table view for every chart, and KPIs as plain numbers.
 
 ## Consequences
-- `make backfill` runs on one core of the laptop and takes about 3 minutes per date (measured in PROGRESS.md).
+- `make backfill` runs one date at a time. The 7-day demo (2026-10-08 to 10-14) took 177–360 s per date, 1,657 s in total (measured).
 - The Airflow history keeps 7 `failed` (cancelled) backfill runs from the native attempt. They never executed tasks and changed no data.
 - The dashboard image (851 MB) builds separately from the Airflow image. It's part of `make up`.

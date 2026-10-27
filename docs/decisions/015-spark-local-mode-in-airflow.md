@@ -17,6 +17,6 @@ Every job runs as `python -m <module>` inside the `airflow` container, with PySp
 - **Pure Python (pandas, pyiceberg):** lighter, but doesn't support Iceberg MERGE, procedures or schema evolution the way Spark does.
 
 ## Consequences
-- Each task pays about 10–15 s of JVM and Spark start-up. A full DAG run takes about 3–4 minutes, most of it start-up and MERGE planning (measured in PROGRESS.md).
+- Each task pays about 10–15 s of JVM and Spark start-up. A full DAG run took 170–250 s in verification, most of it start-up and MERGE planning (measured).
 - The jobs have no local-mode dependency, so the same modules run on EMR or Glue (ADR 013) with a different `master` and catalog configuration.
 - Memory needed: Airflow standalone plus a 2 GB driver, with Postgres, MongoDB and MinIO alongside. That fits in an 8 GB Docker allocation.
