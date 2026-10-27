@@ -87,7 +87,7 @@ Every mart is reconciled against silver on every run (`reconcile_with_silver` in
 | `watermarks` | source × entity | 🔑 (`source`, `entity`), `last_value` (ISO text: naive Malaysia time for Postgres, UTC for MongoDB), `updated_at` |
 | `dq_results` | run × check | `run_id` (Airflow run id or `manual__<layer>__<date>`), `logical_date`, `table`, `check_name` (e.g. `not_null:amount`, `referential:account_id->silver.accounts.account_id`, `reconcile_with_silver`), `severity` (`error`, `warn`), `passed`, `failed_rows`, `details`, `checked_at` |
 | `pipeline_runs` | task attempt | `run_id`, `dag_id`, `task_id`, `logical_date`, `rows_in`, `rows_out`, `duration_s`, `status` (`success`, `failed`, `up_for_retry`), `recorded_at`. Meaning of rows_in/rows_out per task: [ADR 008](decisions/008-airflow-orchestration.md) |
-| `maintenance_log` | maintenance run × table | `run_id`, `table`, `retain_last`; `snapshots_*`, `current_data_files_*`, `current_bytes_*`, `referenced_data_files_*`, `physical_data_files_*`, `physical_metadata_files_*` (each `_before` and `_after`); `rewritten_data_files`, `added_data_files`, `rewritten_manifests`, `expired_data_files_deleted`, `expired_manifest_lists_deleted`, `duration_s`, `maintained_at` |
+| `maintenance_log` | maintenance run × table | `run_id`, `table`, `retain_last`; `snapshots_*`, `current_data_files_*`, `current_delete_files_*` (merge-on-read), `current_bytes_*`, `referenced_data_files_*`, `physical_data_files_*`, `physical_metadata_files_*` (each `_before` and `_after`); `rewritten_data_files`, `added_data_files`, `rewritten_delete_files`, `rewritten_manifests`, `expired_data_files_deleted`, `expired_manifest_lists_deleted`, `duration_s`, `maintained_at` |
 
 ## Serving — Postgres `serving.*`
 

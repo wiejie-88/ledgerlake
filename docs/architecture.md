@@ -92,7 +92,7 @@ flowchart TB
 |---|---|---|---|
 | Bronze | `lake.bronze` | Source rows as extracted, plus `_ingested_at`, `_source`, `_batch_id`, `_logical_date` | Overwrite partition `_logical_date = D` |
 | Quarantine | `lake.quarantine` | Rejected or superseded bronze rows, plus `failure_reason` | Overwrite partition `_quarantine_date = D` |
-| Silver | `lake.silver` | One row per business key; UTC timestamps; email and phone hashed; PII only in `customers_pii` | MERGE (newer `updated_at` wins); events append-only |
+| Silver | `lake.silver` | One row per business key; UTC timestamps; email and phone hashed; PII only in `customers_pii` | MERGE (newer `updated_at` wins); `transactions` is merge-on-read; events append-only |
 | Gold | `lake.gold` | `fact_transactions` (by `days(txn_ts)`), `dim_customer` (SCD1), `dim_date`, 3 marts | MERGE for fact and dims; marts rebuilt |
 | Ops | `lake.ops` | Watermarks, DQ results, run log, maintenance log | Append or MERGE |
 | Serving | Postgres `serving.*` | Marts, `customer_profile`, masked view | One-transaction TRUNCATE and INSERT |

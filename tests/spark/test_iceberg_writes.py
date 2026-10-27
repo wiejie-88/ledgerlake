@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from jobs.common.iceberg import changed_rows
+from jobs.common.iceberg import MERGE_ON_READ, changed_rows, properties_to_set
 from jobs.common.spark import build_spark_conf
+from jobs.silver.run import ENTITIES as SILVER_ENTITIES
 
 ENV = {
     "LAKE_CATALOG_URI": "jdbc:postgresql://postgres:5432/iceberg_catalog",
@@ -40,3 +41,18 @@ def test_changed_rows_without_a_table_is_everything_new(spark) -> None:
     incoming = spark.createDataFrame([("K1", datetime(2026, 10, 1))], "k STRING, updated_at TIMESTAMP")
     rows = changed_rows(incoming, None, "k").collect()
     assert [(r["k"], r["_is_new"]) for r in rows] == [("K1", True)]
+
+
+def test_properties_to_set_only_returns_missing_or_different() -> None:
+    current = {"format-version": "2", "write.merge.mode": "copy-on-write", "write.update.mode": "merge-on-read"}
+    assert properties_to_set(current, MERGE_ON_READ) == {
+        "write.merge.mode": "merge-on-read",
+        "write.delete.mode": "merge-on-read",
+    }
+    assert properties_to_set({**current, **MERGE_ON_READ}, MERGE_ON_READ) == {}
+
+
+def test_silver_transactions_is_merge_on_read_and_others_are_not() -> None:
+    by_name = {e.name: e.table_properties for e in SILVER_ENTITIES}
+    assert by_name["transactions"] == MERGE_ON_READ
+    assert all(props is None for name, props in by_name.items() if name != "transactions")

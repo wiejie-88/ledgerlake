@@ -31,6 +31,32 @@ def create_if_missing(df: DataFrame, table: str, partition_by: list[Column] | No
     return True
 
 
+# Updates and deletes write small position-delete files instead of rewriting whole data files (ADR 011).
+MERGE_ON_READ: dict[str, str] = {
+    "write.merge.mode": "merge-on-read",
+    "write.update.mode": "merge-on-read",
+    "write.delete.mode": "merge-on-read",
+}
+
+
+def properties_to_set(current: dict[str, str], wanted: dict[str, str]) -> dict[str, str]:
+    """The ``wanted`` table properties whose current value is missing or different."""
+    return {k: v for k, v in wanted.items() if current.get(k) != v}
+
+
+def ensure_properties(spark: SparkSession, table: str, wanted: dict[str, str]) -> dict[str, str]:
+    """Set ``wanted`` table properties that aren't already in place; returns what was changed.
+
+    Only differing properties are altered, so a run where everything is set commits no new metadata.
+    """
+    current = {r["key"]: r["value"] for r in spark.sql(f"SHOW TBLPROPERTIES {qualified(table)}").collect()}
+    changes = properties_to_set(current, wanted)
+    if changes:
+        assignments = ", ".join(f"'{k}' = '{v}'" for k, v in changes.items())
+        spark.sql(f"ALTER TABLE {qualified(table)} SET TBLPROPERTIES ({assignments})")
+    return changes
+
+
 def overwrite_partition(df: DataFrame, table: str, partition_col: str, value: Any) -> None:
     """Replace the rows of ``table`` where ``partition_col == value`` with ``df`` (identity partitioning).
 
@@ -57,11 +83,18 @@ def changed_rows(df: DataFrame, current: DataFrame | None, key: str) -> DataFram
     )
 
 
-def merge_latest(df: DataFrame, table: str, key: str, partition_by: list[Column] | None = None) -> tuple[int, int]:
+def merge_latest(
+    df: DataFrame,
+    table: str,
+    key: str,
+    partition_by: list[Column] | None = None,
+    properties: dict[str, str] | None = None,
+) -> tuple[int, int]:
     """Upsert ``df`` into ``table`` on ``key``; an existing row is replaced only by a newer ``updated_at``.
 
     Only new and changed rows reach the MERGE, so copy-on-write rewrites just the files holding updated keys,
     and nothing at all (no snapshot) when nothing changed. ``df`` must hold at most one row per key.
+    ``properties`` (for example MERGE_ON_READ) are applied to the table before merging.
     Returns (inserted, updated).
     """
     spark = df.sparkSession
@@ -70,6 +103,8 @@ def merge_latest(df: DataFrame, table: str, key: str, partition_by: list[Column]
     inserted = changes.where(F.col("_is_new")).count()
     updated = changes.where(~F.col("_is_new")).count()
     create_if_missing(df, table, partition_by)
+    if properties:
+        ensure_properties(spark, table, properties)
     if inserted or updated:
         changes.drop("_is_new").createOrReplaceTempView("_merge_source")
         spark.sql(

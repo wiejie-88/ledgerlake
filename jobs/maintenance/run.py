@@ -37,6 +37,7 @@ log = logging.getLogger("maintenance")
 class TableStats:
     snapshots: int
     current_data_files: int
+    current_delete_files: int  # merge-on-read tables (ADR 011)
     current_bytes: int
     referenced_data_files: int
     physical_data_files: int
@@ -79,9 +80,11 @@ def table_stats(spark: SparkSession, s3: Any, table: str) -> TableStats:
     name = f"{CATALOG}.{table}"
     location = spark.sql(f"DESCRIBE TABLE EXTENDED {name}").where("col_name = 'Location'").first()["data_type"]
     current = spark.table(f"{name}.files").agg(F.count("*").alias("n"), F.sum("file_size_in_bytes").alias("b")).first()
+    deletes = spark.table(f"{name}.delete_files").count()
     return TableStats(
         snapshots=spark.table(f"{name}.snapshots").count(),
-        current_data_files=current["n"],
+        current_data_files=current["n"] - deletes,
+        current_delete_files=deletes,
         current_bytes=current["b"] or 0,
         referenced_data_files=spark.table(f"{name}.all_data_files").select("file_path").distinct().count(),
         physical_data_files=count_objects(s3, location, "data"),
@@ -90,10 +93,14 @@ def table_stats(spark: SparkSession, s3: Any, table: str) -> TableStats:
 
 
 def maintain(spark: SparkSession, table: str, retain_last: int, older_than: datetime) -> dict[str, int]:
-    """Compact, rewrite manifests and expire snapshots for one table; return the procedures' counters."""
-    compact = spark.sql(
-        f"CALL {CATALOG}.system.rewrite_data_files(table => '{table}', options => map('min-input-files', '2'))"
-    ).first()
+    """Compact, rewrite manifests and expire snapshots for one table; return the procedures' counters.
+
+    For merge-on-read tables, a data file with any delete file is rewritten with its deletes applied, and delete
+    files that no longer match a data file are dropped; remaining delete files are then compacted.
+    """
+    options = "map('min-input-files', '2', 'delete-file-threshold', '1', 'remove-dangling-deletes', 'true')"
+    compact = spark.sql(f"CALL {CATALOG}.system.rewrite_data_files(table => '{table}', options => {options})").first()
+    deletes = spark.sql(f"CALL {CATALOG}.system.rewrite_position_delete_files(table => '{table}')").first()
     manifests = spark.sql(f"CALL {CATALOG}.system.rewrite_manifests(table => '{table}')").first()
     expire = spark.sql(
         f"CALL {CATALOG}.system.expire_snapshots(table => '{table}', "
@@ -102,6 +109,7 @@ def maintain(spark: SparkSession, table: str, retain_last: int, older_than: date
     return {
         "rewritten_data_files": compact["rewritten_data_files_count"],
         "added_data_files": compact["added_data_files_count"],
+        "rewritten_delete_files": deletes["rewritten_delete_files_count"],
         "rewritten_manifests": manifests["rewritten_manifests_count"],
         "expired_data_files_deleted": expire["deleted_data_files_count"],
         "expired_manifest_lists_deleted": expire["deleted_manifest_lists_count"],
@@ -133,12 +141,13 @@ def main(argv: list[str] | None = None) -> None:
         totals["before"] += before.physical_data_files
         totals["after"] += after.physical_data_files
         log.info(
-            "table=%s snapshots %d->%d | current data files %d->%d | referenced data files %d->%d | "
-            "physical data files %d->%d | physical metadata files %d->%d | compaction rewrote %d into %d | "
-            "duration_s=%.1f",
+            "table=%s snapshots %d->%d | current data files %d->%d | delete files %d->%d | "
+            "referenced data files %d->%d | physical data files %d->%d | physical metadata files %d->%d | "
+            "compaction rewrote %d into %d | duration_s=%.1f",
             table, before.snapshots, after.snapshots, before.current_data_files, after.current_data_files,
-            before.referenced_data_files, after.referenced_data_files, before.physical_data_files,
-            after.physical_data_files, before.physical_metadata_files, after.physical_metadata_files,
+            before.current_delete_files, after.current_delete_files, before.referenced_data_files,
+            after.referenced_data_files, before.physical_data_files, after.physical_data_files,
+            before.physical_metadata_files, after.physical_metadata_files,
             counters["rewritten_data_files"], counters["added_data_files"], time.monotonic() - t0,
         )  # fmt: skip
         row = {"run_id": run_id, "table": table, "retain_last": args.retain_last}
@@ -150,6 +159,11 @@ def main(argv: list[str] | None = None) -> None:
 
     log_df = spark.createDataFrame(log_rows).withColumn("maintained_at", F.current_timestamp())
     if spark.catalog.tableExists(MAINTENANCE_LOG):
+        # Columns added in later versions of this job (for example delete-file counts) are added to the log first.
+        existing = set(spark.table(MAINTENANCE_LOG).columns)
+        for column, dtype in log_df.dtypes:
+            if column not in existing:
+                spark.sql(f"ALTER TABLE {MAINTENANCE_LOG} ADD COLUMN {column} {dtype}")
         log_df.writeTo(MAINTENANCE_LOG).append()
     else:
         log_df.writeTo(MAINTENANCE_LOG).tableProperty("format-version", "2").create()

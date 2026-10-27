@@ -31,11 +31,25 @@ Comparable days, full `ledgerlake_daily` runs. 2026-10-06 used the old code and 
 - **`silver.accounts`, `customers`, `customers_pii`, `cash_advances`:** from about 200 files a day to 5–8.
 - **Re-runs:** no silver or gold MERGE table commits anything. What remains is by design: the bronze and quarantine partition overwrites, and the mart rebuilds.
 
-## Remaining
-- **`silver.transactions`** still rewrites about 47k of 109k rows a day (8 files written, 85 removed). It's unpartitioned, and copy-on-write must rewrite every file holding an updated key. Settlements update transactions from up to 14 days back, scattered across most files. Two fixes are possible:
-  - (a) `write.merge.mode=merge-on-read`: updates write small delete files, and maintenance compacts them;
-  - (b) partition the table by `days(txn_ts)` through partition evolution, so rewrites stay within recent partitions.
+## Follow-up: merge-on-read for `silver.transactions` (2026-10-27)
+After the changes above, `silver.transactions` still rewrote most of the table every day. It's unpartitioned, and copy-on-write must rewrite every file holding an updated key. Settlements update transactions from up to 14 days back, scattered across most files. Of the two options, (a) merge-on-read or (b) partitioning by `days(txn_ts)`, **(a) was applied**:
+- `silver.transactions` gets `write.merge.mode`, `write.update.mode` and `write.delete.mode` = `merge-on-read`. These are declared on its `SilverEntity` and applied by `merge_latest(..., properties=MERGE_ON_READ)` through `ensure_properties`, which only alters properties that differ.
+- Updates now write small position-delete files. Readers apply them, so DQ, gold and the reconciliation read the merged result.
+- Maintenance compacts them: `rewrite_data_files` with `delete-file-threshold=1` and `remove-dangling-deletes=true`, then `rewrite_position_delete_files`. `ops.maintenance_log` gained `current_delete_files_before/after` and `rewritten_delete_files`, added to the existing table automatically.
 
-  Neither is applied here.
+Measured on comparable days, full DAG runs:
+
+| `silver.transactions` | Copy-on-write (2026-10-16) | Merge-on-read (2026-10-17) |
+|---|---|---|
+| Data files added / removed | 8 / 10 | 1 / 0 |
+| Delete files added | 0 | 11 |
+| Rows written / rewritten | 95,287 / 93,561 | 1,898 / 0 |
+| **All lake tables: rows written** | **130,225** | **30,936** |
+
+- **Same-date re-run:** no silver or gold table committed anything.
+- **DQ:** both runs passed, including `unique:txn_id` and all three gold reconciliations.
+- **`make maintenance`:** `silver.transactions` went from 63 data files plus 11 delete files to **1 data file and 0 delete files**, with 126,323 rows before and after, all with unique `txn_id`. Silver DQ afterwards: 39/39.
+
+**Trade-off:** until maintenance runs, reads apply the delete files, about 11 small files a day at this volume. Run `make maintenance` regularly, at least weekly, so they don't pile up.
 - **`gold.dim_customer`** is a single file of about 2k rows, so any change rewrites it. That's negligible.
 - **Files from before the change** stay until `make maintenance` compacts them (about 200 current files in some silver tables).

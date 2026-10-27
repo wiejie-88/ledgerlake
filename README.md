@@ -103,6 +103,7 @@ Every figure below was measured, not estimated. The quick start figures come fro
 | Re-running a date | all 26 tables have identical row counts (D2-EVE); silver and gold commit no new snapshot (ADR 011) |
 | Time-travel audit, 2026-09-29 | completed spend 91,960.60 MYR as first reported, against 95,201.51 MYR now: +3,240.91 from 99 late status changes |
 | Data files written per daily run | 1,074 before the write-efficiency change, 57 after (ADR 011) |
+| `silver.transactions` rows rewritten per day | 93,561 with copy-on-write, 0 with merge-on-read. Rows written across all tables went from 130,225 to 30,936 per day (ADR 011). |
 | A failing `error` DQ check (simulated) | `dq_silver` failed; `gold` and `dq_gold` `upstream_failed`; failure logged by the callback (D2-EVE, before `publish` was added) |
 | Tests | CI stand-in (clean container): ruff clean, 69 passed and 30 skipped; container 43 passed; access 30 passed |
 

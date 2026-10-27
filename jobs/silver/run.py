@@ -20,6 +20,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from jobs.common.iceberg import (
+    MERGE_ON_READ,
     create_if_missing,
     insert_new,
     merge_latest,
@@ -56,6 +57,7 @@ class SilverEntity:
     parent: tuple[str, str, str] | None = None  # (foreign key column, parent silver table, parent key)
     late_update_ts: str | None = None  # event-time column used to detect late-arriving updates
     version_col: str = "updated_at"  # newest value wins when deduplicating
+    table_properties: dict[str, str] | None = None  # e.g. MERGE_ON_READ for frequently updated tables
 
 
 ENTITIES = (
@@ -67,6 +69,9 @@ ENTITIES = (
         rules.transaction_rules,
         ("account_id", "silver.accounts", "account_id"),
         late_update_ts="txn_ts",
+        # Late settlements update rows spread across the whole table: merge-on-read writes small
+        # delete files instead of rewriting most data files every day (ADR 011).
+        table_properties=MERGE_ON_READ,
     ),
     SilverEntity(
         "cash_advances", "advance_id", rules.cash_advance_rules, ("customer_id", "silver.customers", "customer_id")
@@ -164,7 +169,7 @@ def process_entity(spark: SparkSession, entity: SilverEntity, logical_date: date
                 "cash_advances": conform_cash_advances,
             }[entity.name]
             silver_df = conform(kept, logical_date)
-        inserted, updated = merge_latest(silver_df, silver_table, entity.key)
+        inserted, updated = merge_latest(silver_df, silver_table, entity.key, properties=entity.table_properties)
 
     metrics = {
         "table": silver_table,

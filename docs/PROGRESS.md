@@ -504,6 +504,24 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
   - The health endpoint returns HTTP 200.
 - **Tests:** `make test-container` 45 passed, `make access-test` 30 passed, local `pytest` 26 passed and 30 skipped, ruff and all pre-commit hooks clean.
 
+## Follow-up: merge-on-read for `silver.transactions` (2026-10-27)
+
+**What changed:**
+- `MERGE_ON_READ` table properties plus `properties_to_set` and `ensure_properties` in `jobs/common/iceberg.py`. `merge_latest` gained a `properties` argument, and the transactions entity declares `table_properties=MERGE_ON_READ`.
+- Maintenance: `rewrite_data_files` with `delete-file-threshold=1` and `remove-dangling-deletes=true`, plus `rewrite_position_delete_files`. Delete files are counted before and after, and new columns are added to `ops.maintenance_log` automatically.
+- 2 Spark tests (`tests/spark/test_iceberg_writes.py`).
+- ADR 011 updated.
+
+**Verification result:**
+- **Docker restart first:** Docker Desktop had quit overnight, so the containers had exited. `make up` restarted them in 32 s with all data intact.
+- **Baseline, copy-on-write, `make run date=2026-10-16`** (205 s): `silver.transactions` added 8 data files, removed 10, and wrote **95,287 rows while rewriting 93,561**. All tables together wrote 130,225 rows.
+- **Merge-on-read, `make run date=2026-10-17`** (194 s): `silver.transactions` added **1 data file, 0 removed, and 11 delete files**; it wrote **1,898 rows and rewrote 0**. All tables together wrote 30,936 rows. Both DQ gates passed, and all reconciliations were `mismatched_groups=0`.
+- **Same-date re-run** (184 s): no silver or gold table committed anything.
+- **Table properties:** `SHOW TBLPROPERTIES` shows all three `write.*.mode = merge-on-read`.
+- **`make maintenance`:** `silver.transactions` had 63 data files and 11 delete files, and ended with **1 data file and 0 delete files**. Rows were 126,323 both before and after, with 126,323 distinct `txn_id`. Lake-wide physical data files went from 5,225 to 1,679. `ops.maintenance_log` gained `current_delete_files_before/after` and `rewritten_delete_files`.
+- **Silver DQ after maintenance:** 39/39 passed.
+- **Tests:** `make test-container` gives 47 passed.
+
 ## Known issues / risks
 - **Docker CLI path:** Docker Desktop's `docker` command wasn't on the shell PATH on this Mac, because no `/usr/local/bin/docker` link exists. Commands were run with `/Applications/Docker.app/Contents/Resources/bin` added to PATH. The README explains this.
 - **MinIO image:** the official MinIO images are no longer published, so the project uses the pgsty fork (ADR 002). It worked unchanged.
@@ -524,7 +542,7 @@ All verification ran on a MacBook Air (Apple Silicon) with Docker Desktop: engin
 - **Driver-side publish:** publish collects the serving tables to the Spark driver. That's fine for about 8.4k rows; larger volumes would need COPY plus a table swap (ADR 009).
 - **PII copy:** `customer_profile` is a second copy of personal data, readable by `engineer` only and rebuilt on every publish.
 - **Access-control scope:** access control covers the serving database only. Lake storage (MinIO, Iceberg) uses platform credentials that analysts don't have.
-- **Daily rewrite of `silver.transactions`:** the small-file and full-rewrite problem was fixed (ADR 011). But `silver.transactions` still rewrites about 47k rows a day, because copy-on-write on an unpartitioned table rewrites every file holding a settled transaction. Merge-on-read or `days(txn_ts)` partitioning would fix it; neither is applied.
+- **`silver.transactions` delete files:** the daily rewrite was fixed with merge-on-read (ADR 011 follow-up). Delete files then build up, about 11 a day, until `make maintenance` compacts them. Maintenance is a manual command, so run it regularly.
 - **Mart history:** gold marts are rebuilt with `createOrReplace`, so expiry keeps only their latest snapshot (7 → 1). Time travel on marts isn't retained; the audit demo uses `fact_transactions`.
 - **Limited time-travel window:** time travel reaches only the last 5 snapshots per table after maintenance.
 - **Shared run id:** manual maintenance runs share `run_id = manual` in `ops.maintenance_log`; `maintained_at` tells them apart.
