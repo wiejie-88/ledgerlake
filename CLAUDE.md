@@ -13,13 +13,12 @@ LedgerLake is a 3-day portfolio data engineering project. The full specification
 
 ## Engineering rules
 - Choose the simplest working option. No tools or services beyond SPEC.md without asking me first.
-- Pin every version (Docker images, Python packages, JARs). Record them in `docs/decisions/001-versions.md`.
+- Pin every version (Docker images, Python packages, JARs).
 - Business logic goes in pure, testable functions under `jobs/` and `quality/`. Airflow DAG files only wire tasks together.
 - Every job must be idempotent for a given logical date. Re-running must not create duplicates.
 - Never commit secrets. Configuration comes from `.env`. Keep `.env.example` updated with placeholder values.
 - Synthetic data only. Never use real personal data.
 - If something stays blocked for more than about 30 minutes of attempts, stop. Explain the problem and propose the documented fallback (SPEC.md Section 8) instead of continuing to debug.
-- Write one short ADR in `docs/decisions/` for each significant design decision: context, decision, alternatives considered, consequences.
 
 ## Honesty in documentation
 - Report only measured numbers (row counts, run times, defects caught). Never estimate or invent metrics.

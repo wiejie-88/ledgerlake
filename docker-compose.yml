@@ -1,4 +1,4 @@
-# All images are pinned and have native arm64 builds; see docs/decisions/001-versions.md.
+# All images are pinned and have native arm64 builds.
 # Host ports bind to 127.0.0.1 only. The Compose project name is the checkout's folder name, so two clones in
 # different folders get separate volumes (run only one at a time: they share host ports).
 
@@ -38,8 +38,7 @@ services:
       retries: 20
 
   minio:
-    # Community fork; the official images are no longer published.
-    # See docs/decisions/002-minio-community-image.md.
+    # Community fork (pgsty): the official MinIO images are no longer published; same API and CLI.
     image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:

@@ -31,7 +31,7 @@ def create_if_missing(df: DataFrame, table: str, partition_by: list[Column] | No
     return True
 
 
-# Updates and deletes write small position-delete files instead of rewriting whole data files (ADR 011).
+# Updates and deletes write small position-delete files instead of rewriting whole data files.
 MERGE_ON_READ: dict[str, str] = {
     "write.merge.mode": "merge-on-read",
     "write.update.mode": "merge-on-read",

@@ -1,5 +1,5 @@
 # LedgerLake Airflow image: Airflow 3 + Java 17 + PySpark 3.5 + Iceberg JARs.
-# Every version is pinned; see docs/decisions/001-versions.md.
+# Every version is pinned (image tags, pip packages, JARs with SHA-256 checks).
 
 # Pinned JRE. Multi-arch, so arm64 hosts get the arm64 build.
 FROM eclipse-temurin:17.0.20_8-jre AS jre

@@ -37,7 +37,7 @@ log = logging.getLogger("maintenance")
 class TableStats:
     snapshots: int
     current_data_files: int
-    current_delete_files: int  # merge-on-read tables (ADR 011)
+    current_delete_files: int  # merge-on-read tables
     current_bytes: int
     referenced_data_files: int
     physical_data_files: int

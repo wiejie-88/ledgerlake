@@ -30,11 +30,11 @@ Every task is idempotent for its business date, so re-running a date is safe:
 | Situation | Action |
 |---|---|
 | A task failed for a transient reason | It retries twice automatically (DQ tasks don't retry). Then clear the task in the UI, or run `make run date=D` again. |
-| Backfill several days | `make backfill from=2026-10-08 to=2026-10-14` runs the DAG once per business date, in order, and stops at the first failure (ADR 016). |
+| Backfill several days | `make backfill from=2026-10-08 to=2026-10-14` runs the DAG once per business date, in order, and stops at the first failure. |
 | Backfill through the scheduler (DAG unpaused) | `docker compose exec airflow airflow backfill create --dag-id ledgerlake_daily --from-date 2026-10-08T00:00:00+08:00 --to-date 2026-10-14T00:00:00+08:00`. Pass Malaysia-time boundaries: plain dates are read as UTC and skip the first business day. **Runs of a paused DAG stay `queued`**, and unpausing also starts the daily schedule. Cancel a stuck backfill with `curl -X PUT http://localhost:8080/api/v2/backfills/<id>/cancel`. |
 | Rebuild one layer by hand | `make bronze date=D`, `make silver date=D`, `make gold date=D`, `make publish date=D` (in that order) |
 
-Backfilling a date *earlier* than already-loaded partitions can put a row into two bronze partitions. Silver keeps only the newest version (ADR 004). Gold is rebuilt from current silver, not as of the backfilled date (ADR 007).
+Backfilling a date *earlier* than already-loaded partitions can put a row into two bronze partitions. Silver keeps only the newest version. Gold is rebuilt from current silver, not as of the backfilled date.
 
 ## A DQ gate failed
 1. **Find the failing checks.** The Airflow log of `dq_silver` or `dq_gold` ends with `DQ GATE FAILED: …`. All results are stored:
@@ -74,7 +74,7 @@ Backfilling a date *earlier* than already-loaded partitions can put a row into t
 | New databases or roles missing after editing init scripts | Postgres init scripts run only on an empty volume. Run `make clean`, then `make up`. Roles and grants are re-applied by every publish. |
 | `PII_SALT is not set` or `Missing ANALYST_PASSWORD` | `.env` predates those keys. Copy them from `.env.example`, then `docker compose up -d airflow`. |
 | Time-travel demo: `No retained snapshot … (expired by maintenance?)` | That date's snapshot was expired. Pick a later date, or keep more snapshots. |
-| DAG test fails with `no such table: dag` | Use `DagBag.dags[...]`, not `get_dag()`, which needs a metadata database (ADR 012). |
+| DAG test fails with `no such table: dag` | Use `DagBag.dags[...]`, not `get_dag()`, which needs a metadata database. |
 
 ## Fresh start (reproducible)
 ```bash

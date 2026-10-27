@@ -1,6 +1,6 @@
 # LedgerLake architecture
 
-LedgerLake is a batch lakehouse for a fictional Malaysian consumer fintech app. Everything runs on one laptop with Docker Compose. Design decisions are recorded in [decisions/](decisions/README.md).
+LedgerLake is a batch lakehouse for a fictional Malaysian consumer fintech app. Everything runs on one laptop with Docker Compose.
 
 ## Data flow
 
@@ -46,7 +46,7 @@ flowchart LR
     DQS -. "error check fails" .-> X[downstream tasks upstream_failed]
 ```
 
-- **Business date:** every task processes one Malaysia business date. It comes from the `business_date` param, or the data interval of a midnight `Asia/Kuala_Lumpur` schedule (ADR 008).
+- **Business date:** every task processes one Malaysia business date. It comes from the `business_date` param, or the data interval of a midnight `Asia/Kuala_Lumpur` schedule.
 - **Idempotent:** every task is idempotent for its date.
 - **Retries:** build tasks retry twice; DQ tasks never retry.
 - **Run log:** each attempt writes a row to `ops.pipeline_runs`. Jobs write success rows, and failure and retry callbacks write the rest.
@@ -54,12 +54,12 @@ flowchart LR
 | Step | What happens | Idempotency mechanism |
 |---|---|---|
 | generate_tick | One more day of synthetic source data | `source.generator_log`: a generated day is skipped |
-| extract_bronze | 5 entities read with `watermark_low < updated_at/event_ts < end of day` | Lower bound comes from earlier bronze partitions; partition D is overwritten (ADR 004) |
-| silver | Validate, deduplicate, audit late updates, conform, MERGE | Only new or newer rows are merged; quarantine partition D is overwritten (ADR 005, 011) |
-| dq_silver | 39 checks (including one count per injected defect type) → `ops.dq_results`; exits 1 on an `error` failure | Rows for the run id are replaced (ADR 006) |
-| gold | dims and fact via MERGE; marts rebuilt | Changed-row MERGE; marts are deterministic (ADR 007) |
+| extract_bronze | 5 entities read with `watermark_low < updated_at/event_ts < end of day` | Lower bound comes from earlier bronze partitions; partition D is overwritten |
+| silver | Validate, deduplicate, audit late updates, conform, MERGE | Only new or newer rows are merged; quarantine partition D is overwritten |
+| dq_silver | 39 checks (including one count per injected defect type) → `ops.dq_results`; exits 1 on an `error` failure | Rows for the run id are replaced |
+| gold | dims and fact via MERGE; marts rebuilt | Changed-row MERGE; marts are deterministic |
 | dq_gold | 20 checks, including freshness and mart-vs-silver reconciliation | Same as dq_silver |
-| publish | TRUNCATE and INSERT of 4 serving tables in one transaction; SQL re-applied | Identical tables on re-run (ADR 009) |
+| publish | TRUNCATE and INSERT of 4 serving tables in one transaction; SQL re-applied | Identical tables on re-run |
 
 ## Runtime
 
@@ -82,8 +82,8 @@ flowchart TB
     INIT --> MIN
 ```
 
-- **Spark runs in local mode inside the Airflow container.** There's no cluster (ADR 015). The JARs (Iceberg runtime, Iceberg AWS bundle, Postgres JDBC driver) are baked into the image and SHA-256 verified (ADR 001).
-- **The Iceberg catalog is a JDBC catalog** stored in the Postgres `iceberg_catalog` database (ADR 014). Table data and metadata files live in MinIO (ADR 013).
+- **Spark runs in local mode inside the Airflow container.** There's no cluster. The JARs (Iceberg runtime, Iceberg AWS bundle, Postgres JDBC driver) are baked into the image and SHA-256 verified.
+- **The Iceberg catalog is a JDBC catalog** stored in the Postgres `iceberg_catalog` database. Table data and metadata files live in MinIO.
 - **Ports bind to `127.0.0.1` only.** Secrets come from `.env`, which is git-ignored.
 
 ## Layers

@@ -17,7 +17,7 @@ from quality.gate import CheckResult, Severity
 
 Loader = Callable[[str], DataFrame]
 
-# Quarantine reasons that are an audit trail, not rejected data (see ADR 005).
+# Quarantine reasons that are an audit trail, not rejected data.
 AUDIT_REASONS = ("superseded_by_late_update",)
 
 

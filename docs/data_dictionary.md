@@ -18,7 +18,7 @@ Column names and types are taken from the live tables (2026-10-26). Lake tables 
 | `cash_advances` | one advance | 🔑 `advance_id` text (`ADV000001`), `customer_id`, `amount` numeric(12,2), `requested_at`, `due_date` date (requested + 30 days), `repaid_at` (nullable), `status` (`active`, `repaid`, `overdue`), `updated_at` |
 | `generator_log` | one generated day | 🔑 `run_date` date, `kind` (`base`, `seed`, `tick`), `inserted`, `updated`, `defects` jsonb (counts per table and defect type), `generated_at` timestamptz |
 
-**Injected defects** (about 2.2% of transaction rows, at most one per row): duplicate row, null amount, negative amount, unknown category (`unknown`, `crypto_exchange`, `MISC`), orphan account (`A9…`). Also about 0.5% duplicate app events, and late-arriving updates (pending transactions settle 1–14 days later). See [ADR 003](decisions/003-synthetic-generator.md).
+**Injected defects** (about 2.2% of transaction rows, at most one per row): duplicate row, null amount, negative amount, unknown category (`unknown`, `crypto_exchange`, `MISC`), orphan account (`A9…`). Also about 0.5% duplicate app events, and late-arriving updates (pending transactions settle 1–14 days later).
 
 ## Source — MongoDB `app.app_events`
 
@@ -42,7 +42,7 @@ Same columns and types as the source (Postgres timestamps kept as `timestamp_ntz
 | `_batch_id` | string | Airflow `run_id`, or `manual__<uuid>` |
 | `_logical_date` | date | **Partition column.** The business date whose extract window produced the row |
 
-Tables: `customers`, `accounts`, `transactions`, `cash_advances`, `app_events`. A row appears in partition D if its `updated_at` (or `event_ts`) was after the high-water mark of earlier partitions and before the end of D ([ADR 004](decisions/004-incremental-extract-watermarks.md)).
+Tables: `customers`, `accounts`, `transactions`, `cash_advances`, `app_events`. A row appears in partition D if its `updated_at` (or `event_ts`) was after the high-water mark of earlier partitions and before the end of D.
 
 ## Quarantine — `lake.quarantine.*`
 
@@ -78,7 +78,7 @@ All silver tables add `_logical_date` (the last silver run that wrote the row) a
 | `mart_advance_repayment` | monthly request cohort (Malaysia month) | 🔑 `cohort_month`, `advance_count`, `amount_total`, `repaid_count`, `overdue_count`, `active_count`, `due_count` (due by `as_of_date`), `due_repaid_count`, `late_repaid_count`, `avg_days_late` (mean of max(0, repaid − due) over repaid advances), `repayment_rate` (repaid / all), `repayment_rate_due` (repaid / due), `as_of_date` |
 | `mart_customer_features` | customer × month | 🔑 (`customer_id`, `month`), `spend_total`, `spend_txn_count`, `spend_days`, `daily_spend_stddev`, `daily_spend_cv` (stddev / mean of daily spend), `salary_credit_count`, `salary_total`, `income_regularity_3m` (share of the last 3 calendar months with a salary credit), `advance_count`, `advance_amount` |
 
-Every mart is reconciled against silver on every run (`reconcile_with_silver` in `dq_gold`, [ADR 007](decisions/007-gold-model-and-reconciliation.md)).
+Every mart is reconciled against silver on every run (`reconcile_with_silver` in `dq_gold`).
 
 ## Ops — `lake.ops.*`
 
@@ -86,7 +86,7 @@ Every mart is reconciled against silver on every run (`reconcile_with_silver` in
 |---|---|---|
 | `watermarks` | source × entity | 🔑 (`source`, `entity`), `last_value` (ISO text: naive Malaysia time for Postgres, UTC for MongoDB), `updated_at` |
 | `dq_results` | run × check | `run_id` (Airflow run id or `manual__<layer>__<date>`), `logical_date`, `table`, `check_name` (e.g. `not_null:amount`, `referential:account_id->silver.accounts.account_id`, `reconcile_with_silver`), `severity` (`error`, `warn`), `passed`, `failed_rows`, `details`, `checked_at` |
-| `pipeline_runs` | task attempt | `run_id`, `dag_id`, `task_id`, `logical_date`, `rows_in`, `rows_out`, `duration_s`, `status` (`success`, `failed`, `up_for_retry`), `recorded_at`. Meaning of rows_in/rows_out per task: [ADR 008](decisions/008-airflow-orchestration.md) |
+| `pipeline_runs` | task attempt | `run_id`, `dag_id`, `task_id`, `logical_date`, `rows_in`, `rows_out`, `duration_s`, `status` (`success`, `failed`, `up_for_retry`), `recorded_at`. rows_in / rows_out per task: generate_tick — / source rows inserted; extract_bronze rows extracted / partition rows written; silver rows read / valid rows merged; dq_* checks evaluated / checks passed; gold silver transactions read / dimension and fact changes plus mart rows; publish rows published / rows published |
 | `maintenance_log` | maintenance run × table | `run_id`, `table`, `retain_last`; `snapshots_*`, `current_data_files_*`, `current_delete_files_*` (merge-on-read), `current_bytes_*`, `referenced_data_files_*`, `physical_data_files_*`, `physical_metadata_files_*` (each `_before` and `_after`); `rewritten_data_files`, `added_data_files`, `rewritten_delete_files`, `rewritten_manifests`, `expired_data_files_deleted`, `expired_manifest_lists_deleted`, `duration_s`, `maintained_at` |
 
 ## Serving — Postgres `serving.*`

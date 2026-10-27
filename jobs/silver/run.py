@@ -70,7 +70,7 @@ ENTITIES = (
         ("account_id", "silver.accounts", "account_id"),
         late_update_ts="txn_ts",
         # Late settlements update rows spread across the whole table: merge-on-read writes small
-        # delete files instead of rewriting most data files every day (ADR 011).
+        # delete files instead of rewriting most data files every day.
         table_properties=MERGE_ON_READ,
     ),
     SilverEntity(
